@@ -1,0 +1,11 @@
+node_modules/
+.env
+*.log
+gcp-service-account-key.json
+.DS_Store
+dist/
+build/
+katago/models
+katago/results
+katago/**/venv
+draw/outputs

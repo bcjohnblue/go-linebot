@@ -1,0 +1,34 @@
+{
+  "name": "go-linebot",
+  "version": "1.0.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "description": "LINE Bot for Go game analysis",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "katago:analysis": "bash ./katago/scripts/analysis.sh",
+    "katago": "bash ./katago/scripts/run-python.sh",
+    "node:analysis": "node katago/analysis.js"
+  },
+  "keywords": [
+    "line-bot",
+    "go",
+    "katago"
+  ],
+  "author": "bcjohn",
+  "license": "MIT",
+  "dependencies": {
+    "@google-cloud/compute": "^6.6.0",
+    "@google-cloud/storage": "^7.18.0",
+    "@line/bot-sdk": "^10.5.0",
+    "@sabaki/sgf": "^3.4.7",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "openai": "^6.16.0",
+    "uuid": "^13.0.0"
+  }
+}
