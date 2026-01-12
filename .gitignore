@@ -1,4 +1,5 @@
 node_modules/
+__pycache__
 .env
 *.log
 gcp-service-account-key.json
@@ -7,5 +8,5 @@ dist/
 build/
 katago/models
 katago/results
-katago/**/venv
+**/venv
 draw/outputs
