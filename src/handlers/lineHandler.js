@@ -74,6 +74,118 @@ function encodeUrlPath(path) {
 }
 
 /**
+ * 創建單個 Bubble 內容（用於 Carousel）
+ * @param {number} moveNumber - 手數
+ * @param {string} color - 顏色（B/W）
+ * @param {string} played - 落子位置
+ * @param {string} comment - 評論
+ * @param {string} previewImageUrl - 預覽圖 URL（GIF）
+ * @param {string} videoUrl - 影片 URL（MP4）
+ * @returns {Object} Bubble 物件
+ */
+function createVideoPreviewBubble(
+  moveNumber,
+  color,
+  played,
+  comment,
+  previewImageUrl,
+  videoUrl
+) {
+  const colorText = color === 'B' ? '黑' : '白';
+
+  // 限制評論長度（LINE Flex Message 有字數限制）
+  const maxCommentLength = 500;
+  const truncatedComment =
+    comment.length > maxCommentLength
+      ? comment.substring(0, maxCommentLength) + '...'
+      : comment;
+
+  return {
+    type: 'bubble',
+    hero: {
+      type: 'image',
+      url: previewImageUrl,
+      size: 'full',
+      aspectRatio: '1:1',
+      aspectMode: 'cover',
+      action: {
+        type: 'uri',
+        uri: videoUrl,
+        label: '觀看動畫'
+      }
+    },
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      contents: [
+        {
+          type: 'text',
+          text: `📍 第 ${moveNumber} 手（${colorText}）`,
+          weight: 'bold',
+          size: 'lg',
+          color: '#1DB446'
+        },
+        {
+          type: 'text',
+          text: `落子位置：${played}`,
+          size: 'sm',
+          color: '#666666',
+          margin: 'md'
+        },
+        {
+          type: 'separator',
+          margin: 'md'
+        },
+        {
+          type: 'text',
+          text: truncatedComment,
+          wrap: true,
+          size: 'sm',
+          margin: 'md',
+          color: '#333333'
+        }
+      ]
+    },
+    footer: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'sm',
+      contents: [
+        {
+          type: 'button',
+          style: 'primary',
+          height: 'sm',
+          action: {
+            type: 'uri',
+            label: '🎬 觀看動態棋譜',
+            uri: videoUrl
+          },
+          color: '#1DB446'
+        }
+      ]
+    }
+  };
+}
+
+/**
+ * 創建 Carousel Flex Message（合併多個 bubble）
+ * @param {Array<Object>} bubbles - Bubble 陣列
+ * @param {number} startIndex - 起始索引（用於 altText）
+ * @param {number} totalCount - 總數（用於 altText）
+ * @returns {Object} Flex Message 物件
+ */
+function createCarouselFlexMessage(bubbles, startIndex = 1, totalCount = bubbles.length) {
+  return {
+    type: 'flex',
+    altText: `關鍵手數分析（${startIndex}-${startIndex + bubbles.length - 1}/${totalCount}）`,
+    contents: {
+      type: 'carousel',
+      contents: bubbles
+    }
+  };
+}
+
+/**
  * 幫助訊息內容
  */
 const HELP_MESSAGE = `歡迎使用圍棋分析 Bot！
@@ -93,7 +205,9 @@ const HELP_MESSAGE = `歡迎使用圍棋分析 Bot！
 • 分析使用 KataGo AI（visits=200）
 • KataGo 全盤分析約 10 分鐘
 • ChatGPT 評論生成約 1 分鐘
-• GIF 動畫繪製約 10 秒`;
+• GIF 動畫繪製約 10 秒
+• 覆盤功能每次消耗 4 個推播訊息 × 群組人數
+• 每月訊息上限為 200 則，請注意使用頻率，超出上限將無法使用覆盤功能`;
 
 /**
  * 保存 SGF 檔案到 static 資料夾
@@ -115,39 +229,70 @@ async function saveSgfFile(fileBuffer, originalFileName) {
 }
 
 /**
+ * 發送訊息（優先使用 replyMessage 減少用量，如果 replyToken 已過期則使用 pushMessage）
+ * @param {string} targetId - 推送目標 ID
+ * @param {string|null} replyToken - 回覆 Token（可能為 null 或已過期）
+ * @param {Array} messages - 訊息陣列
+ * @returns {Promise<boolean>} 是否成功使用 replyMessage
+ */
+async function sendMessage(targetId, replyToken, messages) {
+  // 如果有 replyToken，嘗試使用 replyMessage
+  if (replyToken) {
+    try {
+      await client.replyMessage({
+        replyToken,
+        messages
+      });
+      return true; // 成功使用 replyMessage
+    } catch (error) {
+      // replyToken 可能已過期，回退到 pushMessage
+      console.log('replyToken expired or invalid, using pushMessage instead');
+    }
+  }
+
+  // 使用 pushMessage
+  await client.pushMessage({
+    to: targetId,
+    messages
+  });
+  return false; // 使用了 pushMessage
+}
+
+/**
  * 處理覆盤指令
  * @param {string} targetId - 推送目標 ID
+ * @param {string|null} replyToken - 回覆 Token（用於初始回覆，減少用量）
  */
-async function handleReviewCommand(targetId) {
+async function handleReviewCommand(targetId, replyToken) {
   const staticDir = join(__dirname, '../../static');
+  let usedReplyToken = false; // 追蹤是否已使用 replyToken
 
   try {
     const sgfFileName = currentSgfFileName;
     if (!sgfFileName) {
-      await client.pushMessage({
-        to: targetId,
-        messages: [
-          {
-            type: 'text',
-            text: '❌ 找不到棋譜，請先上傳棋譜。'
-          }
-        ]
-      });
+      usedReplyToken = await sendMessage(targetId, replyToken, [
+        {
+          type: 'text',
+          text: '❌ 找不到棋譜，請先上傳棋譜。'
+        }
+      ]);
       return;
     }
 
     const sgfPath = join(staticDir, sgfFileName);
 
-    // 通知開始分析
-    await client.pushMessage({
-      to: targetId,
-      messages: [
-        {
-          type: 'text',
-          text: `✅ 開始對棋譜：${sgfFileName} 進行覆盤分析，完成大約需要 12 分鐘...，請稍後再回來查看分析結果。`
-        }
-      ]
-    });
+    // 通知開始分析（使用 replyMessage 如果可用）
+    usedReplyToken = await sendMessage(targetId, replyToken, [
+      {
+        type: 'text',
+        text: `✅ 開始對棋譜：${sgfFileName} 進行覆盤分析，完成大約需要 12 分鐘...，請稍後再回來查看分析結果。`
+      }
+    ]);
+
+    // 使用 replyToken 後設為 null，後續訊息使用 pushMessage
+    if (usedReplyToken) {
+      replyToken = null;
+    }
 
     // 執行 KataGo 分析
     console.log(`Starting KataGo analysis for: ${sgfPath}`);
@@ -155,53 +300,48 @@ async function handleReviewCommand(targetId) {
       onProgress: (output) => {
         process.stdout.write(output);
       },
-      visits: 10
+      visits: 200
     });
 
     // 檢查分析是否成功
     if (!result.success) {
-      await client.pushMessage({
-        to: targetId,
-        messages: [
+      await sendMessage(
+        targetId,
+        null, // replyToken 已用過或不存在
+        [
           {
             type: 'text',
             text: `❌ KataGo 分析失敗：${result.stderr || '未知錯誤'}`
           }
         ]
-      });
+      );
       return;
     }
 
     // 檢查是否有 moveStats
     if (!result.moveStats) {
-      await client.pushMessage({
-        to: targetId,
-        messages: [
-          {
-            type: 'text',
-            text: '❌ 分析完成但無法轉換結果數據'
-          }
-        ]
-      });
+      await sendMessage(targetId, null, [
+        {
+          type: 'text',
+          text: '❌ 分析完成但無法轉換結果數據'
+        }
+      ]);
       return;
     }
 
     // 分析成功，通知用戶
-    await client.pushMessage({
-      to: targetId,
-      messages: [
-        {
-          type: 'text',
-          text: `✅ KataGo 全盤分析完成！
+    await sendMessage(targetId, null, [
+      {
+        type: 'text',
+        text: `✅ KataGo 全盤分析完成！
 
 📊 分析結果：
 • 檔案：${sgfFileName}
 • 總手數：${result.moveStats.moves.length}
 
 🤖 接續使用 ChatGPT 分析 20 筆關鍵手數並生成評論，大約需要 1 分鐘...，請稍後再回來查看評論結果。`
-        }
-      ]
-    });
+      }
+    ]);
 
     // 篩選前 20 個關鍵點
     const criticalMoves = filterCriticalMoves(result.moveStats.moves);
@@ -215,29 +355,23 @@ async function handleReviewCommand(targetId) {
     console.log(`LLM generated ${llmComments.length} comments`);
 
     // 生成 GIF 動畫
-    await client.pushMessage({
-      to: targetId,
-      messages: [
-        {
-          type: 'text',
-          text: `🎨 正在繪製棋局動畫（共 ${topScoreLossMoves.length} 手）...`
-        }
-      ]
-    });
+    // await sendMessage(targetId, null, [
+    //   {
+    //     type: 'text',
+    //     text: `🎨 正在繪製棋局動畫（共 ${topScoreLossMoves.length} 手）...`
+    //   }
+    // ]);
 
     // 使用 result.jsonPath（完整路徑）而不是 result.jsonFilename
     const jsonFilePath = result.jsonPath;
     if (!jsonFilePath) {
       console.error('KataGo analysis result:', JSON.stringify(result, null, 2));
-      await client.pushMessage({
-        to: targetId,
-        messages: [
-          {
-            type: 'text',
-            text: '❌ 無法取得 KataGo 分析結果檔案路徑'
-          }
-        ]
-      });
+      await sendMessage(targetId, null, [
+        {
+          type: 'text',
+          text: '❌ 無法取得 KataGo 分析結果檔案路徑'
+        }
+      ]);
       return;
     }
 
@@ -284,43 +418,34 @@ async function handleReviewCommand(targetId) {
 
         // 驗證構建的 URL 是否有效
         if (isValidHttpsUrl(globalBoardUrl)) {
-          await client.pushMessage({
-            to: targetId,
-            messages: [
-              {
-                type: 'text',
-                text: '🗺️ 全盤手順圖：'
-              },
-              {
-                type: 'image',
-                originalContentUrl: globalBoardUrl,
-                previewImageUrl: globalBoardUrl
-              }
-            ]
-          });
+          await sendMessage(targetId, null, [
+            {
+              type: 'text',
+              text: '🗺️ 全盤手順圖：'
+            },
+            {
+              type: 'image',
+              originalContentUrl: globalBoardUrl,
+              previewImageUrl: globalBoardUrl
+            }
+          ]);
         } else {
           console.warn(`Invalid HTTPS URL for global board: ${globalBoardUrl}`);
-          await client.pushMessage({
-            to: targetId,
-            messages: [
-              {
-                type: 'text',
-                text: `🗺️ 全盤手順圖已生成\n\n⚠️ 圖片 URL 無效（必須使用 HTTPS）\n請檢查 PUBLIC_URL 環境變數設定`
-              }
-            ]
-          });
+          await sendMessage(targetId, null, [
+            {
+              type: 'text',
+              text: `🗺️ 全盤手順圖已生成\n\n⚠️ 圖片 URL 無效（必須使用 HTTPS）\n請檢查 PUBLIC_URL 環境變數設定`
+            }
+          ]);
         }
       } else {
         console.warn(`PUBLIC_URL not set or not HTTPS: ${publicUrl}`);
-        await client.pushMessage({
-          to: targetId,
-          messages: [
-            {
-              type: 'text',
-              text: `🗺️ 全盤手順圖已生成\n\n⚠️ 未設定有效的 PUBLIC_URL（必須使用 HTTPS）\n請在環境變數中設定 PUBLIC_URL`
-            }
-          ]
-        });
+        await sendMessage(targetId, null, [
+          {
+            type: 'text',
+            text: `🗺️ 全盤手順圖已生成\n\n⚠️ 未設定有效的 PUBLIC_URL（必須使用 HTTPS）\n請在環境變數中設定 PUBLIC_URL`
+          }
+        ]);
       }
 
       // 等待 1 秒後再開始發送每一手的評論
@@ -336,94 +461,166 @@ async function handleReviewCommand(targetId) {
       // 即使全盤圖片發送失敗，也繼續發送其他內容
     }
 
-    // 依序發送（每次發送評論 + GIF）
+    // 收集所有關鍵手數的 bubble（用於合併成 Carousel）
+    const allBubbles = [];
+    const fallbackMessages = []; // 無法生成 bubble 的訊息（如 URL 無效）
+
     for (let i = 0; i < topScoreLossMoves.length; i++) {
       const move = topScoreLossMoves[i];
       const moveNumber = move.move;
       const comment = commentMap[moveNumber] || '無評論';
       const gifPath = gifMap[moveNumber];
 
-      // 準備訊息列表（評論 + GIF）
-      const messages = [];
-
-      // 添加評論訊息
-      messages.push({
-        type: 'text',
-        text: `📍 第 ${moveNumber} 手（${move.color === 'B' ? '黑' : '白'}）- ${move.played}\n\n${comment}`
-      });
-
-      // 如果有 GIF，發送對應的 MP4 video 訊息
+      // 如果有 GIF，嘗試創建 bubble
       if (gifPath) {
         try {
           if (publicUrl && isValidHttpsUrl(publicUrl)) {
             const relativePath = gifPath.split('/draw/outputs/')[1];
             const encodedPath = encodeUrlPath(relativePath);
-            
+
             // 將 .gif 替換為 .mp4
             const mp4Path = encodedPath.replace(/\.gif$/, '.mp4');
             const mp4Url = `${publicUrl}/draw/outputs/${mp4Path}`;
-            
-            // GIF 作為預覽圖（第一幀）
+
+            // GIF 作為預覽圖
             const gifUrl = `${publicUrl}/draw/outputs/${encodedPath}`;
 
             // 驗證構建的 URL 是否有效
             if (isValidHttpsUrl(mp4Url) && isValidHttpsUrl(gifUrl)) {
-              console.log(`Sending video message for move ${moveNumber}: ${mp4Url}`);
-              messages.push({
-                type: 'video',
-                originalContentUrl: mp4Url,
-                previewImageUrl: gifUrl  // 使用 GIF 作為預覽圖
-              });
+              console.log(`Creating bubble for move ${moveNumber}`);
+
+              // 創建 bubble（用於 Carousel）
+              const bubble = createVideoPreviewBubble(
+                moveNumber,
+                move.color,
+                move.played,
+                comment,
+                gifUrl,
+                mp4Url
+              );
+
+              allBubbles.push(bubble);
             } else {
-              console.warn(`Invalid HTTPS URL for move ${moveNumber}: ${mp4Url}`);
+              console.warn(
+                `Invalid HTTPS URL for move ${moveNumber}: ${mp4Url}`
+              );
+              // 如果 URL 無效，記錄為回退訊息
+              fallbackMessages.push({
+                moveNumber,
+                text: `📍 第 ${moveNumber} 手（${
+                  move.color === 'B' ? '黑' : '白'
+                }）- ${move.played}\n\n${comment}\n\n⚠️ 影片連結無效`
+              });
             }
+          } else {
+            // 如果沒有有效的 PUBLIC_URL，記錄為回退訊息
+            fallbackMessages.push({
+              moveNumber,
+              text: `📍 第 ${moveNumber} 手（${
+                move.color === 'B' ? '黑' : '白'
+              }）- ${move.played}\n\n${comment}`
+            });
           }
-        } catch (videoError) {
+        } catch (flexError) {
           console.error(
-            `Error preparing video for move ${moveNumber}:`,
-            videoError
+            `Error preparing bubble for move ${moveNumber}:`,
+            flexError
+          );
+          // 錯誤時記錄為回退訊息
+          fallbackMessages.push({
+            moveNumber,
+            text: `📍 第 ${moveNumber} 手（${
+              move.color === 'B' ? '黑' : '白'
+            }）- ${move.played}\n\n${comment}`
+          });
+        }
+      } else {
+        // 如果沒有 GIF，記錄為回退訊息
+        fallbackMessages.push({
+          moveNumber,
+          text: `📍 第 ${moveNumber} 手（${
+            move.color === 'B' ? '黑' : '白'
+          }）- ${move.played}\n\n${comment}`
+        });
+      }
+    }
+
+    // 分批發送 Carousel（LINE 限制每組最多 12 個 bubble，設定為 10 以確保穩定）
+    const MAX_BUBBLES_PER_CAROUSEL = 10;
+    const totalBubbles = allBubbles.length;
+
+    if (totalBubbles > 0) {
+      console.log(`Sending ${totalBubbles} bubbles in Carousel format`);
+
+      // 分批處理
+      for (let i = 0; i < allBubbles.length; i += MAX_BUBBLES_PER_CAROUSEL) {
+        const batch = allBubbles.slice(i, i + MAX_BUBBLES_PER_CAROUSEL);
+        const startIndex = i + 1;
+        const endIndex = Math.min(i + batch.length, totalBubbles);
+
+        try {
+          // 創建 Carousel Flex Message
+          const carouselMessage = createCarouselFlexMessage(
+            batch,
+            startIndex,
+            totalBubbles
+          );
+
+          await sendMessage(targetId, null, [carouselMessage]);
+
+          console.log(
+            `Sent Carousel ${Math.floor(i / MAX_BUBBLES_PER_CAROUSEL) + 1} (moves ${startIndex}-${endIndex})`
+          );
+
+          // 避免發送太快，間隔 1 秒
+          if (i + MAX_BUBBLES_PER_CAROUSEL < allBubbles.length) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+        } catch (carouselError) {
+          console.error(
+            `Error sending Carousel (moves ${startIndex}-${endIndex}):`,
+            carouselError
           );
         }
       }
+    }
 
-      // 一次發送所有訊息（評論 + GIF）
-      try {
-        await client.pushMessage({
-          to: targetId,
-          messages: messages
-        });
-
-        // 避免發送太快，間隔 800ms
-        await new Promise((resolve) => setTimeout(resolve, 800));
-      } catch (sendError) {
-        console.error(
-          `Error sending messages for move ${moveNumber}:`,
-          sendError
-        );
+    // 發送無法生成 bubble 的回退訊息（如果有的話）
+    if (fallbackMessages.length > 0) {
+      console.log(`Sending ${fallbackMessages.length} fallback text messages`);
+      for (const fallback of fallbackMessages) {
+        try {
+          await sendMessage(targetId, null, [
+            {
+              type: 'text',
+              text: fallback.text
+            }
+          ]);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch (fallbackError) {
+          console.error(
+            `Error sending fallback message for move ${fallback.moveNumber}:`,
+            fallbackError
+          );
+        }
       }
     }
 
     // 完成通知
-    await client.pushMessage({
-      to: targetId,
-      messages: [
-        {
-          type: 'text',
-          text: `🎉 所有分析已完成！共分析 ${topScoreLossMoves.length} 個關鍵手數。`
-        }
-      ]
-    });
+    // await sendMessage(targetId, null, [
+    //   {
+    //     type: 'text',
+    //     text: `🎉 所有分析已完成！共分析 ${topScoreLossMoves.length} 個關鍵手數。`
+    //   }
+    // ]);
   } catch (error) {
     console.error('Error in 覆盤 command:', error);
-    await client.pushMessage({
-      to: targetId,
-      messages: [
-        {
-          type: 'text',
-          text: `❌ 執行覆盤時發生錯誤：${error.message}`
-        }
-      ]
-    });
+    await sendMessage(targetId, null, [
+      {
+        type: 'text',
+        text: `❌ 執行覆盤時發生錯誤：${error.message}`
+      }
+    ]);
   }
 }
 
@@ -488,7 +685,8 @@ export async function handleTextMessage(event) {
   if (text === '覆盤') {
     // 取得推送目標 ID
     const targetId = source.groupId || source.roomId || source.userId;
-    await handleReviewCommand(targetId);
+    // 傳遞 replyToken 用於初始回覆（減少用量）
+    await handleReviewCommand(targetId, replyToken);
     return Promise.resolve(null);
   }
 
@@ -549,9 +747,9 @@ export async function handleFileMessage(event) {
 
     currentSgfFileName = uploadedSgfFile;
 
-    // 通知用戶文件已保存
-    await client.pushMessage({
-      to: targetId,
+    // 通知用戶文件已保存（使用 replyMessage 減少用量）
+    await client.replyMessage({
+      replyToken,
       messages: [
         {
           type: 'text',
@@ -565,8 +763,8 @@ export async function handleFileMessage(event) {
     });
   } catch (error) {
     console.error('Error handling file message:', error);
-    await client.pushMessage({
-      to: targetId,
+    await client.replyMessage({
+      replyToken,
       messages: [
         {
           type: 'text',
@@ -748,7 +946,7 @@ async function monitorAndReplyTask(targetId, taskId) {
 /**
  * LINE Webhook 中間件
  */
-export const lineMiddleware = middleware({
-  channelAccessToken: config.line.channelAccessToken,
-  channelSecret: config.line.channelSecret
-});
+// export const lineMiddleware = middleware({
+//   channelAccessToken: config.line.channelAccessToken,
+//   channelSecret: config.line.channelSecret
+// });

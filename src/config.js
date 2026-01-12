@@ -60,7 +60,7 @@ export const config = {
 // Validate required config
 const requiredEnvVars = [
   'LINE_CHANNEL_ACCESS_TOKEN',
-  'LINE_CHANNEL_SECRET',
+  // 'LINE_CHANNEL_SECRET',
   'GCP_PROJECT_ID',
   'GCS_BUCKET_NAME',
 ];
