@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,7 @@ from linebot.v3.messaging.models import (
     FlexContainer,
 )
 from linebot.v3.messaging.exceptions import ApiException
+from sgfmill import sgf
 
 from config import config
 from logger import logger
@@ -26,6 +28,8 @@ from handlers.katago_handler import run_katago_analysis
 from handlers.sgf_handler import filter_critical_moves, get_top_score_loss_moves
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
+from handlers.go_engine import GoBoard
+from handlers.board_visualizer import BoardVisualizer
 
 # Initialize LINE Bot API v3
 configuration = Configuration(access_token=config["line"]["channel_access_token"])
@@ -36,6 +40,20 @@ blob_api = MessagingApiBlob(api_client)
 
 current_sgf_file_name: Optional[str] = None
 bot_user_id: Optional[str] = None
+
+# Game state management (per user/group/room)
+# Key: target_id (userId/groupId/roomId), Value: game state dict
+game_states: Dict[str, Dict[str, Any]] = {}
+
+# Game ID management (per target_id)
+# Key: target_id, Value: game_id (unique ID for each game session)
+game_ids: Dict[str, str] = {}
+
+# Initialize board visualizer (shared instance)
+current_file = Path(__file__)
+project_root = current_file.parent.parent.parent
+assets_dir = project_root / "assets"
+visualizer = BoardVisualizer(assets_dir=str(assets_dir))
 
 
 # Get Bot's own User ID
@@ -171,12 +189,20 @@ HELP_MESSAGE = """歡迎使用圍棋分析 Bot！
 
 指令：
 • help / 幫助 / 說明 - 顯示此說明
-• 覆盤 - 對最新上傳的棋譜執行 KataGo 分析
+• 覆盤 / review - 對最新上傳的棋譜執行 KataGo 分析
+
+🎮 對局功能：
+• 輸入座標（如 D4, Q16）- 落子並顯示棋盤
+• 悔棋 / undo - 撤銷上一步
+• 讀取 / load - 從存檔恢復遊戲
+• 重置 / reset - 重置棋盤，開始新遊戲
 
 使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
 2️⃣ 輸入「覆盤」開始分析
 3️⃣ 等待 10-15 分鐘獲得分析結果
+
+或直接輸入座標開始對局！
 
 注意事項：
 • 分析使用 KataGo AI（visits=200）
@@ -548,6 +574,582 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
         )
 
 
+def get_game_id(target_id: str) -> str:
+    """Get or create game ID for a target (user/group/room)
+    Game ID is a unique identifier for each game session.
+    """
+    if target_id not in game_ids:
+        # Generate new game ID (timestamp-based)
+        game_ids[target_id] = f"game_{int(time.time())}"
+        logger.info(f"Created new game ID for {target_id}: {game_ids[target_id]}")
+    return game_ids[target_id]
+
+
+def get_game_state(target_id: str) -> Dict[str, Any]:
+    """Get or create game state for a target (user/group/room)
+
+    If game state doesn't exist in memory, try to restore from latest SGF file.
+    If no SGF file exists, create a new game.
+    """
+    if target_id not in game_states:
+        # Try to restore from SGF file
+        restored = restore_game_from_sgf(target_id)
+        if restored:
+            game_states[target_id] = restored
+            # Try to extract game_id from restored SGF file path
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent.parent
+            static_dir = project_root / "static"
+            pattern = f"game_{target_id}_*"
+            sgf_files = list(static_dir.glob(f"**/{pattern}/*.sgf"))
+            if sgf_files:
+                # Extract game_id from path: static/{game_id}/game_{target_id}_{timestamp}.sgf
+                latest_sgf = max(sgf_files, key=lambda p: p.stat().st_mtime)
+                game_id = latest_sgf.parent.name
+                game_ids[target_id] = game_id
+            logger.info(f"Restored game state for {target_id} from SGF file")
+        else:
+            # Create new game
+            game_states[target_id] = {
+                "game": GoBoard(),
+                "current_turn": 1,  # 1=黑, 2=白
+                "sgf_game": sgf.Sgf_game(size=19),
+            }
+            # Generate new game ID
+            get_game_id(target_id)
+            logger.info(f"Created new game state for {target_id}")
+    return game_states[target_id]
+
+
+def restore_game_from_sgf_file(sgf_path: str) -> Optional[Dict[str, Any]]:
+    """Restore game state from a specific SGF file path"""
+    try:
+        # Load SGF file
+        with open(sgf_path, "rb") as f:
+            sgf_game = sgf.Sgf_game.from_bytes(f.read())
+
+        # Rebuild board state from SGF
+        game = GoBoard()
+        current_turn = 1  # Start with black
+        last_move_coords = None
+
+        # Traverse SGF to rebuild board
+        for node in sgf_game.get_main_sequence():
+            color, move = node.get_move()
+            if move is not None:
+                # move is (sgf_row, sgf_col), where sgf_row 0 is bottom
+                sgf_r, sgf_c = move
+
+                # Convert to engine coordinates (row 0 is top)
+                r = 18 - sgf_r
+                c = sgf_c
+
+                last_move_coords = (r, c)
+                stone_val = 1 if color == "b" else 2
+
+                # Place stone on board
+                game.board[r][c] = stone_val
+
+                # Handle capture logic (simplified - just remove captured stones)
+                opponent = 2 if stone_val == 1 else 1
+                captured_stones = []
+                neighbors = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
+                for nr, nc in neighbors:
+                    if 0 <= nr < 19 and 0 <= nc < 19:
+                        if game.board[nr][nc] == opponent:
+                            group, libs = game.get_group_and_liberties(nr, nc)
+                            if libs == 0:
+                                for gr, gc in group:
+                                    captured_stones.append((gr, gc))
+
+                # Remove captured stones
+                for cr, cc in captured_stones:
+                    game.board[cr][cc] = 0
+
+                # Update ko point (simplified)
+                my_group, my_libs = game.get_group_and_liberties(r, c)
+                if len(captured_stones) == 1 and my_libs == 1:
+                    game.ko_point = captured_stones[0]
+                else:
+                    game.ko_point = None
+
+                # Switch turn
+                current_turn = 2 if stone_val == 1 else 1
+
+        return {
+            "game": game,
+            "current_turn": current_turn,
+            "sgf_game": sgf_game,
+        }
+    except Exception as error:
+        logger.error(
+            f"Failed to restore game from SGF file {sgf_path}: {error}", exc_info=True
+        )
+        return None
+
+
+def restore_game_from_sgf(target_id: str) -> Optional[Dict[str, Any]]:
+    """Try to restore game state from latest SGF file for this target"""
+    try:
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+
+        if not static_dir.exists():
+            return None
+
+        # Find SGF file for this target
+        # Pattern: static/{game_id}/game_{target_id}.sgf (fixed filename)
+        # Try to find the latest game_id folder with this target's SGF
+        pattern = f"**/game_{target_id}.sgf"
+        sgf_files = list(static_dir.glob(pattern))
+
+        if not sgf_files:
+            return None
+
+        # Get the latest file (by modification time)
+        latest_sgf = max(sgf_files, key=lambda p: p.stat().st_mtime)
+
+        # Use the helper function to restore
+        return restore_game_from_sgf_file(str(latest_sgf))
+    except Exception as error:
+        logger.error(
+            f"Failed to restore game from SGF for {target_id}: {error}", exc_info=True
+        )
+        return None
+
+
+def save_game_sgf(target_id: str) -> Optional[str]:
+    """Save current game SGF to file in game-specific folder
+    Updates the same SGF file for the same game session (same game_id)
+    """
+    if target_id not in game_states:
+        return None
+
+    state = game_states[target_id]
+    sgf_game = state["sgf_game"]
+
+    try:
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+
+        # Get or create game ID
+        game_id = get_game_id(target_id)
+
+        # Create game-specific folder
+        game_dir = static_dir / game_id
+        game_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use fixed filename for the same game (no timestamp, so it gets overwritten)
+        filename = f"game_{target_id}.sgf"
+        file_path = game_dir / filename
+
+        with open(file_path, "wb") as f:
+            f.write(sgf_game.serialise())
+
+        logger.info(f"Saved/Updated game SGF to {file_path}")
+        return str(file_path)
+    except Exception as error:
+        logger.error(f"Failed to save game SGF: {error}", exc_info=True)
+        return None
+
+
+def reset_game_state(target_id: str):
+    """Reset game state for a target and create new game ID"""
+    if target_id in game_states:
+        game_states[target_id] = {
+            "game": GoBoard(),
+            "current_turn": 1,
+            "sgf_game": sgf.Sgf_game(size=19),
+        }
+        # Generate new game ID for new game
+        game_ids[target_id] = f"game_{int(time.time())}"
+        logger.info(
+            f"Reset game state for {target_id}, new game ID: {game_ids[target_id]}"
+        )
+
+
+async def handle_board_move(
+    target_id: str, reply_token: Optional[str], coord_text: str, source: Dict[str, Any]
+):
+    """Handle board coordinate input and draw board"""
+    try:
+        # Get game state for this target
+        state = get_game_state(target_id)
+        game = state["game"]
+        current_turn = state["current_turn"]
+        sgf_game = state["sgf_game"]
+
+        # Place stone
+        success, msg = game.place_stone(coord_text, current_turn)
+
+        if not success:
+            # Failed to place stone, send error message
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=f"提示：{msg}")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        # Successfully placed stone
+        coords = game.parse_coordinates(coord_text)
+
+        # --- 1. Update SGF record ---
+        node = sgf_game.get_last_node()
+        new_node = node.new_child()
+
+        color_code = "b" if current_turn == 1 else "w"
+
+        # coords is (row, col), where row 0 is top
+        # sgfmill thinks row 0 is bottom, so flip: (19 - 1 - row)
+        sgf_row = 18 - coords[0]
+        sgf_col = coords[1]
+
+        new_node.set_move(color_code, (sgf_row, sgf_col))
+
+        # Save SGF file
+        sgf_path = save_game_sgf(target_id)
+        if sgf_path:
+            logger.info(f"Saved game SGF: {sgf_path}")
+
+        # --- 2. Switch turn and draw board ---
+        state["current_turn"] = 2 if current_turn == 1 else 1
+
+        # Generate board image
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+
+        # Get game ID and create game-specific folder
+        game_id = get_game_id(target_id)
+        game_dir = static_dir / game_id
+        game_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = int(time.time())
+        filename = f"board_{target_id}_{timestamp}.png"
+        output_path = game_dir / filename
+
+        # Draw board with last move highlighted
+        visualizer.draw_board(
+            game.board, last_move=coords, output_filename=str(output_path)
+        )
+
+        # Get public URL for image
+        public_url = config["server"]["public_url"]
+        if public_url and is_valid_https_url(public_url):
+            # Build image URL (game_id/filename)
+            relative_path = f"static/{game_id}/{filename}"
+            encoded_path = encode_url_path(relative_path)
+            image_url = f"{public_url}/{encoded_path}"
+
+            if is_valid_https_url(image_url):
+                # Send board image
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        ImageMessage(
+                            original_content_url=image_url,
+                            preview_image_url=image_url,
+                        )
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+            else:
+                logger.warning(f"Invalid image URL: {image_url}")
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(
+                            text=f"✅ {msg}\n\n⚠️ 圖片 URL 無效，請檢查 PUBLIC_URL 設定"
+                        )
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+        else:
+            logger.warning(f"PUBLIC_URL not set or invalid: {public_url}")
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"✅ {msg}\n\n⚠️ 未設定有效的 PUBLIC_URL，無法顯示圖片"
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling board move: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"❌ 處理落子時發生錯誤：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+async def handle_undo_move(target_id: str, reply_token: Optional[str]):
+    """Handle undo move (悔棋)"""
+    try:
+        if target_id not in game_states:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="目前沒有進行中的對局，無法悔棋。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        state = game_states[target_id]
+        sgf_game = state["sgf_game"]
+
+        # Get last node
+        last_node = sgf_game.get_last_node()
+        parent_node = last_node.parent
+
+        # Check if it's root node (can't undo)
+        if parent_node is None:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="目前是初始狀態，無法悔棋。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        try:
+            # Delete last move from SGF
+            last_node.delete()
+
+            # Save updated SGF
+            save_game_sgf(target_id)
+
+            # Restore game state from updated SGF
+            game_id = get_game_id(target_id)
+            current_file = Path(__file__)
+            project_root = current_file.parent.parent.parent
+            static_dir = project_root / "static"
+            sgf_path = static_dir / game_id / f"game_{target_id}.sgf"
+
+            if sgf_path.exists():
+                restored = restore_game_from_sgf_file(str(sgf_path))
+                if restored:
+                    game_states[target_id] = restored
+                    state = restored
+                else:
+                    # If restore failed, reset to empty board
+                    game_states[target_id] = {
+                        "game": GoBoard(),
+                        "current_turn": 1,
+                        "sgf_game": sgf.Sgf_game(size=19),
+                    }
+                    state = game_states[target_id]
+            else:
+                # If SGF doesn't exist, reset to empty board
+                game_states[target_id] = {
+                    "game": GoBoard(),
+                    "current_turn": 1,
+                    "sgf_game": sgf.Sgf_game(size=19),
+                }
+                state = game_states[target_id]
+
+            game = state["game"]
+            current_turn = state["current_turn"]
+
+            # Find last move coordinates for highlighting
+            last_coords = None
+            for r in range(19):
+                for c in range(19):
+                    if game.board[r][c] != 0:
+                        last_coords = (r, c)
+
+            # Draw board
+            game_id = get_game_id(target_id)
+            game_dir = static_dir / game_id
+            game_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = int(time.time())
+            filename = f"board_undo_{target_id}_{timestamp}.png"
+            output_path = game_dir / filename
+
+            visualizer.draw_board(
+                game.board, last_move=last_coords, output_filename=str(output_path)
+            )
+
+            # Send board image
+            public_url = config["server"]["public_url"]
+            turn_text = "黑" if current_turn == 1 else "白"
+
+            if public_url and is_valid_https_url(public_url):
+                relative_path = f"static/{game_id}/{filename}"
+                encoded_path = encode_url_path(relative_path)
+                image_url = f"{public_url}/{encoded_path}"
+
+                if is_valid_https_url(image_url):
+                    request = ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[
+                            TextMessage(text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}"),
+                            ImageMessage(
+                                original_content_url=image_url,
+                                preview_image_url=image_url,
+                            ),
+                        ],
+                    )
+                    await asyncio.to_thread(line_bot_api.reply_message, request)
+                else:
+                    request = ReplyMessageRequest(
+                        reply_token=reply_token,
+                        messages=[
+                            TextMessage(
+                                text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
+                            )
+                        ],
+                    )
+                    await asyncio.to_thread(line_bot_api.reply_message, request)
+            else:
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(
+                            text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}\n\n⚠️ 未設定有效的 PUBLIC_URL"
+                        )
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+
+        except Exception as e:
+            logger.error(f"Error undoing move: {e}", exc_info=True)
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=f"悔棋失敗：{str(e)}")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling undo move: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"❌ 處理悔棋時發生錯誤：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+async def handle_load_game(target_id: str, reply_token: Optional[str]):
+    """Handle load game (讀取)"""
+    try:
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+
+        if not static_dir.exists():
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="找不到存檔。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        # Find latest SGF file for this target
+        pattern = f"**/game_{target_id}.sgf"
+        sgf_files = list(static_dir.glob(pattern))
+
+        if not sgf_files:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="找不到存檔。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        # Get the latest file
+        latest_sgf = max(sgf_files, key=lambda p: p.stat().st_mtime)
+
+        # Extract game_id from path
+        game_id = latest_sgf.parent.name
+        game_ids[target_id] = game_id
+
+        # Restore game state
+        restored = restore_game_from_sgf_file(str(latest_sgf))
+        if not restored:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="讀取失敗：無法解析棋譜檔案。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        game_states[target_id] = restored
+        state = restored
+        game = state["game"]
+        current_turn = state["current_turn"]
+
+        # Find last move coordinates for highlighting
+        last_coords = None
+        for r in range(19):
+            for c in range(19):
+                if game.board[r][c] != 0:
+                    last_coords = (r, c)
+
+        # Draw board
+        game_dir = static_dir / game_id
+        timestamp = int(time.time())
+        filename = f"board_restored_{target_id}_{timestamp}.png"
+        output_path = game_dir / filename
+
+        visualizer.draw_board(
+            game.board, last_move=last_coords, output_filename=str(output_path)
+        )
+
+        # Send board image
+        public_url = config["server"]["public_url"]
+        turn_text = "黑" if current_turn == 1 else "白"
+
+        if public_url and is_valid_https_url(public_url):
+            relative_path = f"static/{game_id}/{filename}"
+            encoded_path = encode_url_path(relative_path)
+            image_url = f"{public_url}/{encoded_path}"
+
+            if is_valid_https_url(image_url):
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(text=f"📂 已讀取棋譜！目前輪到：{turn_text}"),
+                        ImageMessage(
+                            original_content_url=image_url,
+                            preview_image_url=image_url,
+                        ),
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+            else:
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(
+                            text=f"📂 已讀取棋譜！目前輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
+                        )
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"📂 已讀取棋譜！目前輪到：{turn_text}\n\n⚠️ 未設定有效的 PUBLIC_URL"
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling load game: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"讀取失敗：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
 async def handle_text_message(event: Dict[str, Any]):
     """Handle text message"""
     reply_token = event.get("replyToken")
@@ -596,13 +1198,44 @@ async def handle_text_message(event: Dict[str, Any]):
         await asyncio.to_thread(line_bot_api.reply_message, request)
         return
 
-    if text == "覆盤":
+    if text == "覆盤" or text.lower() == "review":
         # Get push target ID
         target_id = (
             source.get("groupId") or source.get("roomId") or source.get("userId")
         )
         # Pass replyToken for initial reply (reduce usage)
         await handle_review_command(target_id, reply_token)
+        return
+
+    # Get target ID for game state management
+    target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+
+    # Check if input is a board coordinate (A-T, 1-19)
+    # Pattern matches coordinates like "D4", "Q16", etc. (skips 'I')
+    coord_pattern = r"^[A-HJ-T]([1-9]|1[0-9])$"
+    user_text_upper = text.upper().strip()
+
+    if re.match(coord_pattern, user_text_upper):
+        # Handle board coordinate input
+        await handle_board_move(target_id, reply_token, user_text_upper, source)
+        return
+
+    # Handle other commands (reset, undo, load, etc.)
+    if "重置" in text or "reset" in text.lower():
+        reset_game_state(target_id)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text="棋盤已重置，黑棋請下。")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    if "悔棋" in text or "undo" in text.lower():
+        await handle_undo_move(target_id, reply_token)
+        return
+
+    if "讀取" in text or "load" in text.lower():
+        await handle_load_game(target_id, reply_token)
         return
 
 

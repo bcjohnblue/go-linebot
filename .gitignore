@@ -10,3 +10,5 @@ katago/models
 katago/results
 **/venv
 draw/outputs
+my_go_bot
+static/game_*/
