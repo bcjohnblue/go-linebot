@@ -567,21 +567,22 @@ def create_gif_for_move(move_data, all_moves_data, output_path):
         )
 
         # 同時生成 MP4 版本（用於 LINE video 訊息）
-        mp4_path = output_path.replace('.gif', '.mp4')
+        mp4_path = output_path.replace(".gif", ".mp4")
         try:
             # 使用 imageio 生成 MP4
             # fps=1 表示每秒 1 幀（與 GIF 的 1000ms duration 對應）
             # 最後一幀需要重複 5 次以停留 5 秒
             mp4_frames = frames[:-1] + [frames[-1]] * 5
-            
+
             import imageio
+
             imageio.mimsave(
                 mp4_path,
                 [np.array(frame) for frame in mp4_frames],
                 fps=1,
-                codec='libx264',
-                pixelformat='yuv420p',
-                output_params=['-movflags', '+faststart']  # 優化串流播放
+                codec="libx264",
+                pixelformat="yuv420p",
+                output_params=["-movflags", "+faststart"],  # 優化串流播放
             )
             print(f"MP4 created: {mp4_path}")
         except Exception as e:
@@ -599,14 +600,25 @@ def filter_critical_moves(moves, threshold=2.0):
     return [m for m in moves if get_score_loss(m) > threshold]
 
 
-def get_top_score_loss_moves(moves, top_n=20):
-    """获取 score_loss 最高的 top_n 个 moves，并按 move 排序"""
+def get_top_winrate_diff_moves(moves, top_n=20):
+    """获取胜率差距（winrate_before - winrate_after）最大的 top_n 个 moves，并按 move 排序"""
 
-    def get_score_loss(move):
-        score_loss = move.get("score_loss")
-        return score_loss if score_loss is not None else 0.0
+    def get_winrate_diff(move):
+        winrate_before = move.get("winrate_before")
+        winrate_after = move.get("winrate_after")
+        if (
+            winrate_before is not None
+            and winrate_after is not None
+            and isinstance(winrate_before, (int, float))
+            and isinstance(winrate_after, (int, float))
+        ):
+            # 计算胜率差距（胜率下降多少）
+            winrate_diff = winrate_before - winrate_after
+            # 只返回胜率下降的步数
+            return winrate_diff if winrate_diff > 0 else 0.0
+        return 0.0
 
-    sorted_moves = sorted(moves, key=get_score_loss, reverse=True)
+    sorted_moves = sorted(moves, key=get_winrate_diff, reverse=True)
     top_moves = sorted_moves[:top_n]
     # 按 move 排序
     top_moves.sort(key=lambda x: x.get("move", 0))
@@ -632,8 +644,8 @@ def main():
     all_moves = data.get("moves", [])
 
     # 过滤并获取 topScoreLossMoves（前 20 个）
-    critical_moves = filter_critical_moves(all_moves, threshold=2.0)
-    top_moves = get_top_score_loss_moves(critical_moves, top_n=20)
+    # critical_moves = filter_critical_moves(all_moves, threshold=2.0)
+    top_moves = get_top_winrate_diff_moves(all_moves, top_n=20)
 
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)

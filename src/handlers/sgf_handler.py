@@ -209,26 +209,38 @@ def filter_critical_moves(moves: list, threshold: float = 2.0) -> list:
     ]
 
 
-def get_top_score_loss_moves(moves: list, top_n: int = 20) -> list:
-    """Get top N moves with highest score_loss (to avoid too many critical points)"""
+def get_top_winrate_diff_moves(moves: list, top_n: int = 20) -> list:
+    """Get top N moves with highest winrate difference (winrate_before - winrate_after)"""
     if not moves or not isinstance(moves, list):
         return []
 
-    # Filter moves with score_loss
-    moves_with_score_loss = [
-        move
-        for move in moves
-        if move.get("score_loss") is not None
-        and isinstance(move["score_loss"], (int, float))
-    ]
+    # Filter moves with both winrate_before and winrate_after
+    moves_with_winrate_diff = []
+    for move in moves:
+        winrate_before = move.get("winrate_before")
+        winrate_after = move.get("winrate_after")
 
-    # Sort by score_loss descending
-    sorted_by_score_loss = sorted(
-        moves_with_score_loss, key=lambda x: x["score_loss"], reverse=True
+        if (
+            winrate_before is not None
+            and winrate_after is not None
+            and isinstance(winrate_before, (int, float))
+            and isinstance(winrate_after, (int, float))
+        ):
+            # Calculate winrate difference (how much winrate dropped)
+            winrate_diff = winrate_before - winrate_after
+            # Only include moves where winrate actually decreased
+            if winrate_diff > 0:
+                move_copy = move.copy()
+                move_copy["winrate_diff"] = winrate_diff
+                moves_with_winrate_diff.append(move_copy)
+
+    # Sort by winrate_diff descending (biggest drop first)
+    sorted_by_winrate_diff = sorted(
+        moves_with_winrate_diff, key=lambda x: x["winrate_diff"], reverse=True
     )
 
     # Take top N moves
-    top_moves = sorted_by_score_loss[:top_n]
+    top_moves = sorted_by_winrate_diff[:top_n]
 
     # Finally sort by move number ascending
     return sorted(top_moves, key=lambda x: x["move"])

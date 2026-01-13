@@ -25,7 +25,7 @@ from sgfmill import sgf
 from config import config
 from logger import logger
 from handlers.katago_handler import run_katago_analysis
-from handlers.sgf_handler import filter_critical_moves, get_top_score_loss_moves
+from handlers.sgf_handler import filter_critical_moves, get_top_winrate_diff_moves
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
 from handlers.go_engine import GoBoard
@@ -97,6 +97,9 @@ def create_video_preview_bubble(
     comment: str,
     preview_image_url: str,
     video_url: str,
+    winrate_before: Optional[float] = None,
+    winrate_after: Optional[float] = None,
+    score_loss: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Create single Bubble content (for Carousel)"""
     color_text = "黑" if color == "B" else "白"
@@ -107,6 +110,67 @@ def create_video_preview_bubble(
         comment[:max_comment_length] + "..."
         if len(comment) > max_comment_length
         else comment
+    )
+
+    # Build body contents
+    body_contents = [
+        {
+            "type": "text",
+            "text": f"📍 第 {move_number} 手（{color_text}）",
+            "weight": "bold",
+            "size": "lg",
+            "color": "#1DB446",
+        },
+        {
+            "type": "text",
+            "text": f"落子位置：{played}",
+            "size": "sm",
+            "color": "#666666",
+            "margin": "md",
+        },
+    ]
+
+    # Add winrate change if available
+    if winrate_before is not None and winrate_after is not None:
+        winrate_diff = winrate_before - winrate_after
+        winrate_text = f"勝率變化：{winrate_before:.1f}% → {winrate_after:.1f}%"
+        if winrate_diff > 0:
+            winrate_text += f" (↓{winrate_diff:.1f}%)"
+        else:
+            winrate_text += f" (↑{abs(winrate_diff):.1f}%)"
+
+        body_contents.append(
+            {
+                "type": "text",
+                "text": winrate_text,
+                "size": "sm",
+                "color": "#FF6B6B" if winrate_diff > 0 else "#4ECDC4",
+                "margin": "sm",
+            }
+        )
+
+    # Add score loss if available
+    if score_loss is not None:
+        body_contents.append(
+            {
+                "type": "text",
+                "text": f"目差損失：{score_loss:.1f} 目",
+                "size": "sm",
+                "color": "#FF6B6B",
+                "margin": "sm",
+            }
+        )
+
+    body_contents.append({"type": "separator", "margin": "md"})
+    body_contents.append(
+        {
+            "type": "text",
+            "text": truncated_comment,
+            "wrap": True,
+            "size": "sm",
+            "margin": "md",
+            "color": "#333333",
+        }
     )
 
     return {
@@ -122,31 +186,7 @@ def create_video_preview_bubble(
         "body": {
             "type": "box",
             "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": f"📍 第 {move_number} 手（{color_text}）",
-                    "weight": "bold",
-                    "size": "lg",
-                    "color": "#1DB446",
-                },
-                {
-                    "type": "text",
-                    "text": f"落子位置：{played}",
-                    "size": "sm",
-                    "color": "#666666",
-                    "margin": "md",
-                },
-                {"type": "separator", "margin": "md"},
-                {
-                    "type": "text",
-                    "text": truncated_comment,
-                    "wrap": True,
-                    "size": "sm",
-                    "margin": "md",
-                    "color": "#333333",
-                },
-            ],
+            "contents": body_contents,
         },
         "footer": {
             "type": "box",
@@ -197,16 +237,14 @@ HELP_MESSAGE = """歡迎使用圍棋分析 Bot！
 • 讀取 / load - 從存檔恢復遊戲
 • 重置 / reset - 重置棋盤，開始新遊戲
 
-使用流程：
+📊 覆盤使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
 2️⃣ 輸入「覆盤」開始分析
-3️⃣ 等待 10-15 分鐘獲得分析結果
-
-或直接輸入座標開始對局！
+3️⃣ 等待 15-20 分鐘獲得分析結果
 
 注意事項：
 • 分析使用 KataGo AI（visits=200）
-• KataGo 全盤分析約 10 分鐘
+• KataGo 全盤分析約 15 分鐘
 • ChatGPT 評論生成約 1 分鐘
 • GIF 動畫繪製約 10 秒
 • 覆盤功能每次消耗 4 個推播訊息 × 群組人數
@@ -289,7 +327,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
         # Execute KataGo analysis
         print(f"Starting KataGo analysis for: {sgf_path}")
-        result = await run_katago_analysis(str(sgf_path), visits=5)
+        result = await run_katago_analysis(str(sgf_path), visits=200)
 
         # Check if analysis was successful
         if not result.get("success"):
@@ -329,8 +367,10 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
         )
 
         # Filter top 20 critical points
-        critical_moves = filter_critical_moves(result["moveStats"]["moves"])
-        top_score_loss_moves = get_top_score_loss_moves(critical_moves, 20)
+        # critical_moves = filter_critical_moves(result["moveStats"]["moves"])
+        top_score_loss_moves = get_top_winrate_diff_moves(
+            result["moveStats"]["moves"], 20
+        )
 
         logger.info("Preparing to call OpenAI...")
 
@@ -464,6 +504,9 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
                                 comment,
                                 gif_url,
                                 mp4_url,
+                                winrate_before=move.get("winrate_before"),
+                                winrate_after=move.get("winrate_after"),
+                                score_loss=move.get("score_loss"),
                             )
 
                             all_bubbles.append(bubble)

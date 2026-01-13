@@ -14,7 +14,7 @@ from handlers.line_handler import handle_text_message, handle_file_message
 from handlers.sgf_handler import (
     parse_sgf,
     filter_critical_moves,
-    get_top_score_loss_moves,
+    get_top_winrate_diff_moves,
 )
 from handlers.katago_handler import run_katago_analysis
 from handlers.draw_handler import draw_all_moves_gif
@@ -135,7 +135,7 @@ async def parse_sample_katrain():
         # Parse SGF content
         parsed_data = parse_sgf(sgf_content)
         critical_moves = filter_critical_moves(parsed_data["moves"])
-        top_score_loss_moves = get_top_score_loss_moves(critical_moves)
+        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
 
         # Return JSON
         return {
@@ -199,8 +199,8 @@ async def get_katago_result(filename: str):
         file_content = file_path.read_text(encoding="utf-8")
         result = json.loads(file_content)
 
-        critical_moves = filter_critical_moves(result["moves"])
-        top_score_loss_moves = get_top_score_loss_moves(critical_moves)
+        # critical_moves = filter_critical_moves(result["moves"])
+        top_score_loss_moves = get_top_winrate_diff_moves(result["moves"])
 
         # Return JSON
         return {
@@ -231,7 +231,7 @@ async def katago_draw(filename: str):
         result = json.loads(file_content)
 
         critical_moves = filter_critical_moves(result["moves"])
-        top_score_loss_moves = get_top_score_loss_moves(critical_moves)
+        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
 
         # Generate all GIFs
         output_dir = PROJECT_ROOT / "draw" / "outputs" / filename.replace(".json", "")
@@ -276,7 +276,7 @@ async def llm_analysis(filename: str):
 
         # Filter critical moves
         critical_moves = filter_critical_moves(katago_data["moves"])
-        top_score_loss_moves = get_top_score_loss_moves(critical_moves)
+        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
 
         # Call OpenAI
         response = await call_openai(top_score_loss_moves)
