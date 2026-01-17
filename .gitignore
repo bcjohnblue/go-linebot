@@ -6,8 +6,14 @@ gcp-service-account-key.json
 .DS_Store
 dist/
 build/
+
+# katago
 **/katago/models/
 **/katago/results/
+
+# venv
 **/venv/
-draw/outputs/
-static/game_*/
+
+# localhost_all
+apps/localhost_all/static/game_*/
+apps/localhost_all/draw/outputs/
