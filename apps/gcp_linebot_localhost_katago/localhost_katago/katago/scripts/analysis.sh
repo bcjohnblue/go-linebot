@@ -8,9 +8,10 @@ set -e
 # 獲取腳本所在目錄
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KATAGO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOCALHOST_KATAGO_DIR="$(cd "$KATAGO_DIR/.." && pwd)"
 
-# KataWrap 虛擬環境路徑（使用 katago/venv）
-VENV_PY="${VENV_PY:-$KATAGO_DIR/venv/bin/python}"
+# KataWrap 虛擬環境路徑（使用 localhost_katago/venv）
+VENV_PY="${VENV_PY:-$LOCALHOST_KATAGO_DIR/venv/bin/python}"
 
 # SGF 文件參數（必需）
 SGF_FILE="$1"
@@ -45,17 +46,6 @@ fi
 # 檢查 katawrap.py 是否存在
 if [ ! -f "$KATAWRAP_PY" ]; then
   echo "Error: katawrap.py not found: $KATAWRAP_PY"
-  exit 1
-fi
-
-# 檢查虛擬環境是否存在
-if [ ! -f "$VENV_PY" ]; then
-  echo "Error: Virtual environment not found: $VENV_PY"
-  echo "Please create a virtual environment:"
-  echo "  cd $KATAGO_DIR"
-  echo "  python3 -m venv venv"
-  echo "  source venv/bin/activate"
-  echo "  pip install sgfmill"
   exit 1
 fi
 
