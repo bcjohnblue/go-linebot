@@ -98,6 +98,8 @@ async def execute_analysis_task(
                 json_remote_path = f"target_{target_id}/reviews/{task_id}.json"
                 # Use configured bucket for upload
                 json_blob = configured_bucket.blob(json_remote_path)
+                # Set cache control to avoid caching
+                json_blob.cache_control = "no-cache, max-age=0"
                 json_blob.upload_from_filename(result["jsonPath"])
                 result_paths["json_gcs_path"] = (
                     f"gs://{config['storage']['bucket_name']}/{json_remote_path}"
