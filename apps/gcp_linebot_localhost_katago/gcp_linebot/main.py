@@ -86,27 +86,27 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
-async def process_analysis_results(
+async def process_review_results(
     task_id: str,
     target_id: str,
     move_stats: dict,
     result_paths: dict,
 ):
-    """Process analysis results in background: LLM analysis + GIF generation"""
+    """Process review results in background: LLM analysis + GIF generation"""
     try:
         # Import here to avoid circular imports
         from handlers.line_handler import send_message
         from linebot.v3.messaging.models import TextMessage, ImageMessage
 
-        # 通知用户分析完成，准备进行 LLM 分析
+        # 通知用户覆盤完成，准备进行 LLM 分析
         await send_message(
             target_id,
             None,
             [
                 TextMessage(
-                    text=f"""✅ KataGo 全盤分析完成！
+                    text=f"""✅ KataGo 全盤覆盤完成！
 
-📊 分析結果：
+📊 覆盤結果：
 • 總手數：{len(move_stats.get('moves', []))}
 
 🤖 接續使用 ChatGPT 分析 20 筆關鍵手數並生成評論，大約需要 1 分鐘...，請稍後再回來查看評論結果。"""
@@ -131,7 +131,7 @@ async def process_analysis_results(
             await send_message(
                 target_id,
                 None,
-                [TextMessage(text="❌ 無法取得 KataGo 分析結果檔案路徑")],
+                [TextMessage(text="❌ 無法取得 KataGo 覆盤結果檔案路徑")],
             )
             return
 
@@ -340,20 +340,20 @@ async def process_analysis_results(
 
     except Exception as error:
         logger.error(
-            f"Error in process_analysis_results for task {task_id}: {error}",
+            f"Error in process_review_results for task {task_id}: {error}",
             exc_info=True,
         )
 
 
-@app.post("/callback/analysis")
-async def callback_analysis(request: Request):
+@app.post("/callback/review")
+async def callback_review(request: Request):
     """
-    接收本机 localhost 服务完成 KataGo 分析后的回调通知
+    接收本机 localhost 服务完成 KataGo 覆盤后的回调通知
 
     流程说明：
     1. 用户发送"覆盤"指令 → Cloud Run 立即返回，不等待
-    2. Cloud Run POST 请求到 localhost:8000/analyze
-    3. localhost 执行 KataGo 分析（15-20分钟）
+    2. Cloud Run POST 请求到 localhost:8000/review
+    3. localhost 执行 KataGo 覆盤（15-20分钟）
     4. localhost 上传结果到 GCS，然后 POST 回调到此端点
     5. 此端点继续处理：LLM 分析 → GIF 生成 → 发送给用户
 
@@ -363,10 +363,10 @@ async def callback_analysis(request: Request):
         "status": "success" | "failed",
         "target_id": "LINE用户ID",
         "result_paths": {
-            "json_gcs_path": "gs://bucket/analysis/.../result.json",
-            "jsonl_gcs_path": "gs://bucket/analysis/.../result.jsonl"
+            "json_gcs_path": "gs://bucket/reviews/.../result.json",
+            "jsonl_gcs_path": "gs://bucket/reviews/.../result.jsonl"
         },
-        "move_stats": { ... }  // 分析结果数据（仅 status=success 时）
+        "move_stats": { ... }  // 覆盤结果数据（仅 status=success 时）
     }
     """
     try:
@@ -384,12 +384,12 @@ async def callback_analysis(request: Request):
                 detail="Missing required fields: task_id, status, target_id",
             )
 
-        logger.info(f"Received analysis callback: task_id={task_id}, status={status}")
+        logger.info(f"Received review callback: task_id={task_id}, status={status}")
 
-        # 处理分析失败的情况
+        # 处理覆盤失败的情况
         if status == "failed":
             error = body.get("error", "Unknown error")
-            logger.error(f"Analysis failed for task {task_id}: {error}")
+            logger.error(f"Review failed for task {task_id}: {error}")
             # 发送错误消息给用户
             from handlers.line_handler import send_message
             from linebot.v3.messaging.models import TextMessage
@@ -397,7 +397,7 @@ async def callback_analysis(request: Request):
             await send_message(
                 target_id,
                 None,
-                [TextMessage(text=f"❌ KataGo 分析失敗：{error}")],
+                [TextMessage(text=f"❌ KataGo 覆盤失敗：{error}")],
             )
             return JSONResponse(content={"status": "received"}, status_code=200)
 
@@ -409,12 +409,12 @@ async def callback_analysis(request: Request):
             await send_message(
                 target_id,
                 None,
-                [TextMessage(text="❌ 分析完成但無法取得結果數據")],
+                [TextMessage(text="❌ 覆盤完成但無法取得結果數據")],
             )
             return JSONResponse(content={"status": "received"}, status_code=200)
 
-        # 分析成功，继续处理后续流程（LLM 分析 + GIF 生成）
-        await process_analysis_results(
+        # 覆盤成功，继续处理后续流程（LLM 分析 + GIF 生成）
+        await process_review_results(
             task_id=task_id,
             target_id=target_id,
             move_stats=move_stats,

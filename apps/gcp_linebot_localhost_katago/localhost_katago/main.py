@@ -12,7 +12,7 @@ import httpx
 import tempfile
 
 
-app = FastAPI(title="Localhost Analysis Service")
+app = FastAPI(title="Localhost Review Service")
 
 # CORS middleware
 app.add_middleware(
@@ -24,14 +24,14 @@ app.add_middleware(
 )
 
 
-async def execute_analysis_task(
+async def execute_review_task(
     task_id: str,
     sgf_gcs_path: str,
     callback_url: str,
     target_id: str,
     visits: int,
 ):
-    """Execute KataGo analysis task in background"""
+    """Execute KataGo review task in background"""
     try:
         # Extract GCS path (gs://bucket/path or bucket/path)
         if sgf_gcs_path.startswith("gs://"):
@@ -56,7 +56,7 @@ async def execute_analysis_task(
         else:
             bucket = configured_bucket
 
-        # Create temporary directory for analysis
+        # Create temporary directory for review
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
 
@@ -68,13 +68,13 @@ async def execute_analysis_task(
             local_sgf_path.write_bytes(sgf_content)
             logger.info(f"Downloaded SGF file to: {local_sgf_path}")
 
-            # Execute KataGo analysis
-            logger.info(f"Starting KataGo analysis for task: {task_id}")
+            # Execute KataGo review
+            logger.info(f"Starting KataGo review for task: {task_id}")
             result = await run_katago_analysis(str(local_sgf_path), visits=visits)
 
             if not result.get("success"):
                 error_msg = result.get("stderr", "Unknown error")
-                logger.error(f"KataGo analysis failed for task {task_id}: {error_msg}")
+                logger.error(f"KataGo review failed for task {task_id}: {error_msg}")
 
                 # Notify Cloud Run of failure
                 async with httpx.AsyncClient() as client:
@@ -90,7 +90,7 @@ async def execute_analysis_task(
                     )
                 return
 
-            # Upload analysis results to GCS
+            # Upload review results to GCS
             result_paths = {}
 
             # Upload JSON file if exists
@@ -127,7 +127,7 @@ async def execute_analysis_task(
                 logger.info(f"Successfully notified Cloud Run: {response.status_code}")
 
     except Exception as error:
-        logger.error(f"Error in analysis task {task_id}: {error}", exc_info=True)
+        logger.error(f"Error in review task {task_id}: {error}", exc_info=True)
         # Try to notify Cloud Run of error
         try:
             async with httpx.AsyncClient() as client:
@@ -147,9 +147,9 @@ async def execute_analysis_task(
             )
 
 
-@app.post("/analysis")
-async def analyze_from_cloud_run(request: Request, background_tasks: BackgroundTasks):
-    """Receive analysis request from Cloud Run and execute KataGo analysis asynchronously"""
+@app.post("/review")
+async def review_from_cloud_run(request: Request, background_tasks: BackgroundTasks):
+    """Receive review request from Cloud Run and execute KataGo review asynchronously"""
     try:
         body = await request.json()
         task_id = body.get("task_id")
@@ -165,12 +165,12 @@ async def analyze_from_cloud_run(request: Request, background_tasks: BackgroundT
             )
 
         logger.info(
-            f"Received analysis request: task_id={task_id}, sgf_gcs_path={sgf_gcs_path}"
+            f"Received review request: task_id={task_id}, sgf_gcs_path={sgf_gcs_path}"
         )
 
-        # Add analysis task to background tasks
+        # Add review task to background tasks
         background_tasks.add_task(
-            execute_analysis_task,
+            execute_review_task,
             task_id=task_id,
             sgf_gcs_path=sgf_gcs_path,
             callback_url=callback_url,
@@ -183,15 +183,15 @@ async def analyze_from_cloud_run(request: Request, background_tasks: BackgroundT
             content={
                 "status": "accepted",
                 "task_id": task_id,
-                "message": "Analysis task started",
+                "message": "Review task started",
             },
             status_code=202,
         )
 
     except Exception as error:
-        logger.error(f"Error in analyze endpoint: {error}", exc_info=True)
+        logger.error(f"Error in review endpoint: {error}", exc_info=True)
         raise HTTPException(
-            status_code=500, detail=f"Failed to process analysis request: {str(error)}"
+            status_code=500, detail=f"Failed to process review request: {str(error)}"
         )
 
 

@@ -359,11 +359,8 @@ def create_sgf_file_flex_message(file_url: str, game_id: str) -> FlexMessage:
 
 HELP_MESSAGE = """歡迎使用圍棋分析 Bot！
 
-📤 上傳 SGF 棋譜檔案，棋譜會被保存到伺服器。
-
 指令：
 • help / 幫助 / 說明 - 顯示此說明
-• 覆盤 / review - 對最新上傳的棋譜執行 KataGo 分析
 
 🎮 對局功能：
 • 輸入座標（如 D4, Q16）- 落子並顯示棋盤
@@ -371,12 +368,13 @@ HELP_MESSAGE = """歡迎使用圍棋分析 Bot！
 • 讀取 / load - 從存檔恢復遊戲
 • 重置 / reset - 重置棋盤，開始新遊戲
 
+📊 覆盤功能：
+• 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤
+
 使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
 2️⃣ 輸入「覆盤」開始分析
 3️⃣ 等待 10-15 分鐘獲得分析結果
-
-或直接輸入座標開始對局！
 
 注意事項：
 • 分析使用 KataGo AI（visits=200）
@@ -438,7 +436,7 @@ async def send_message(
 
 
 async def handle_review_command(target_id: str, reply_token: Optional[str]):
-    """Handle review command - POST to localhost service for analysis"""
+    """Handle review command - POST to localhost service for review"""
     import httpx
     import uuid
 
@@ -496,11 +494,11 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             )
 
         # Get localhost URL and callback URL from config
-        localhost_url = config.get("localhost", {}).get("analysis_url")
-        callback_analysis_url = config.get("cloud_run", {}).get("callback_analysis_url")
+        localhost_url = config.get("localhost", {}).get("review_url")
+        callback_review_url = config.get("cloud_run", {}).get("callback_review_url")
 
         if not localhost_url:
-            logger.error("LOCALHOST_ANALYSIS_URL not configured")
+            logger.error("LOCALHOST_REVIEW_URL not configured")
             await send_message(
                 target_id,
                 reply_token,
@@ -508,8 +506,8 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             )
             return
 
-        if not callback_analysis_url:
-            logger.error("CLOUD_RUN_CALLBACK_ANALYSIS_URL not configured")
+        if not callback_review_url:
+            logger.error("CLOUD_RUN_CALLBACK_REVIEW_URL not configured")
             await send_message(
                 target_id,
                 reply_token,
@@ -517,7 +515,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             )
             return
 
-        # Notify start of analysis (use replyMessage if available)
+        # Notify start of review (use replyMessage if available)
         sgf_file_name = os.path.basename(sgf_gcs_path)
         # Only process SGF files, ignore other file types (e.g., JSON files)
         if sgf_file_name.lower().endswith(".sgf"):
@@ -543,23 +541,23 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
         if used_reply_token:
             reply_token = None
 
-        # POST analysis request to localhost service
-        logger.info(f"Posting analysis request to localhost: {localhost_url}")
+        # POST review request to localhost service
+        logger.info(f"Posting review request to localhost: {localhost_url}")
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 localhost_url,
                 json={
                     "task_id": task_id,
                     "sgf_gcs_path": sgf_gcs_path,
-                    "callback_url": callback_analysis_url,
+                    "callback_url": callback_review_url,
                     "target_id": target_id,
                     "visits": 5,
                 },
             )
             response.raise_for_status()
-            logger.info(f"Successfully posted analysis request: {response.status_code}")
+            logger.info(f"Successfully posted review request: {response.status_code}")
 
-        # Analysis will continue asynchronously via callback
+        # Review will continue asynchronously via callback
         # No need to wait here
     except Exception as error:
         logger.error(f"Error in 覆盤 command: {error}", exc_info=True)

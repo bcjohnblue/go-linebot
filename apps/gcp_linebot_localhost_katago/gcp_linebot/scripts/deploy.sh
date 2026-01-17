@@ -49,8 +49,8 @@ if ! gcloud builds submit --tag "$IMAGE_NAME" --project "$PROJECT_ID"; then
 fi
 
 # 設定環境變數預設值（可透過環境變數覆蓋）
-LOCALHOST_ANALYSIS_URL=${LOCALHOST_ANALYSIS_URL:-"https://assumption-coated-extensions-toys.trycloudflare.com/analysis"}
-CLOUD_RUN_CALLBACK_ANALYSIS_URL=${CLOUD_RUN_CALLBACK_ANALYSIS_URL:-"https://go-linebot-webhook-731821281792.asia-east1.run.app/callback/analysis"}
+LOCALHOST_REVIEW_URL=${LOCALHOST_REVIEW_URL:-"https://assumption-coated-extensions-toys.trycloudflare.com/review"}
+CLOUD_RUN_CALLBACK_REVIEW_URL=${CLOUD_RUN_CALLBACK_REVIEW_URL:-"https://go-linebot-webhook-731821281792.asia-east1.run.app/callback/review"}
 GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-"go-linebot-files"}
 
 # 驗證必要環境變數
@@ -64,7 +64,7 @@ SECRETS_ARG="--update-secrets=LINE_CHANNEL_ACCESS_TOKEN=LINE_CHANNEL_ACCESS_TOKE
 
 # 準備 Cloud Run 環境變數
 # 包含應用啟動所需的所有環境變數
-ENV_VARS_ARG="--set-env-vars=LOCALHOST_ANALYSIS_URL=${LOCALHOST_ANALYSIS_URL},CLOUD_RUN_CALLBACK_ANALYSIS_URL=${CLOUD_RUN_CALLBACK_ANALYSIS_URL},GCP_PROJECT_ID=${PROJECT_ID},GCS_BUCKET_NAME=${GCS_BUCKET_NAME}"
+ENV_VARS_ARG="--set-env-vars=LOCALHOST_REVIEW_URL=${LOCALHOST_REVIEW_URL},CLOUD_RUN_CALLBACK_REVIEW_URL=${CLOUD_RUN_CALLBACK_REVIEW_URL},GCP_PROJECT_ID=${PROJECT_ID},GCS_BUCKET_NAME=${GCS_BUCKET_NAME}"
 
 # 部署到 Cloud Run
 echo "🌐 正在部署到 Cloud Run..."

@@ -21,13 +21,13 @@ config = {
         "port": int(os.getenv("PORT", "8080")),
         "webhook_path": os.getenv("WEBHOOK_PATH", "/webhook"),
     },
-    # Localhost Analysis Service
+    # Localhost Review Service
     "localhost": {
-        "analysis_url": os.getenv("LOCALHOST_ANALYSIS_URL"),
+        "review_url": os.getenv("LOCALHOST_REVIEW_URL"),
     },
     # Cloud Run Callback
     "cloud_run": {
-        "callback_analysis_url": os.getenv("CLOUD_RUN_CALLBACK_ANALYSIS_URL"),
+        "callback_review_url": os.getenv("CLOUD_RUN_CALLBACK_REVIEW_URL"),
     },
     # OpenAI
     "openai": {
