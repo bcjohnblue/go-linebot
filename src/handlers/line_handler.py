@@ -1214,12 +1214,32 @@ async def handle_text_message(event: Dict[str, Any]):
 
         # Check if mention includes bot itself
         mentions = mention["mentionees"]
-        is_bot_mentioned = any(
-            mentionee.get("userId") == bot_user_id for mentionee in mentions
-        )
+
+        # Initialize bot_user_id if not set
+        if bot_user_id is None:
+            logger.warning("bot_user_id is None, initializing...")
+            await init_bot_user_id()
+
+        # Check if bot is mentioned using userId or isSelf field
+        is_bot_mentioned = False
+        for mentionee in mentions:
+            # Check by userId match
+            if bot_user_id and mentionee.get("userId") == bot_user_id:
+                is_bot_mentioned = True
+                break
+            # Also check isSelf field as fallback (when bot mentions itself)
+            if mentionee.get("isSelf", False):
+                is_bot_mentioned = True
+                logger.info(f"Bot mentioned via isSelf field: {mentionee}")
+                break
 
         if not is_bot_mentioned:
             # Mention is not bot, ignore this message
+            logger.warning(
+                f"Mention check failed: bot_user_id={bot_user_id}, "
+                f"mention_userIds={[m.get('userId') for m in mentions]}, "
+                f"isSelf_flags={[m.get('isSelf', False) for m in mentions]}"
+            )
             return
 
         # Remove mention markers to get actual command

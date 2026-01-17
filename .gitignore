@@ -6,9 +6,8 @@ gcp-service-account-key.json
 .DS_Store
 dist/
 build/
-katago/models
-katago/results
-**/venv
-draw/outputs
-my_go_bot
+**/katago/models/
+**/katago/results/
+**/venv/
+draw/outputs/
 static/game_*/
