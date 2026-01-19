@@ -1,0 +1,65 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Environment files
+.env
+.env.local
+.env.*.local
+env.example
+
+# Logs and analysis results
+*.log
+analysis_logs/
+results/
+
+# Documentation (optional, can include if needed)
+*.md
+!README.md
+
+# Test files (if any)
+test/
+tests/
+*_test.py
+*_tests.py
+
+# Local development files
+main.py
+scripts/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Jupyter notebooks (if any)
+*.ipynb
+.ipynb_checkpoints/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
