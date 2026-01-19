@@ -127,8 +127,8 @@ image = (
 @app.function(
     image=image,
     gpu="T4",  # KataGo needs GPU
-    timeout=3600,  # 1 hour timeout
-    memory=8192,  # 8GB memory
+    timeout=600,  # 10 minutes timeout
+    memory=4096,  # 4GB memory
     volumes={str(MODEL_DIR): katago_models_volume},  # Mount Volume for models
     secrets=[
         modal.Secret.from_name("gcp-go-linebot"),  # GCP service account key

@@ -21,8 +21,8 @@ $VENV_PY -c "import chardet; print(f'[DEBUG] chardet found at: {chardet.__file__
 
 # SGF 文件參數（必需）
 SGF_FILE="$1"
-# 搜索次數（預設 10）
-VISITS="${VISITS:-10}"
+# 搜索次數（預設 5）
+VISITS="${VISITS:-5}"
 
 # KataGo 路徑設定
 KATAGO_BIN="${KATAGO_BIN:-katago}"

@@ -15,8 +15,8 @@ VENV_PY="${VENV_PY:-$LOCALHOST_KATAGO_DIR/venv/bin/python}"
 
 # SGF 文件參數（必需）
 SGF_FILE="$1"
-# 搜索次數（預設 10）
-VISITS="${VISITS:-10}"
+# 搜索次數（預設 5）
+VISITS="${VISITS:-5}"
 
 # KataGo 路徑設定
 KATAGO_BIN="${KATAGO_BIN:-katago}"
