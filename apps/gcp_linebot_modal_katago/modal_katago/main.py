@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any
 import modal
-from fastapi import Request, HTTPException
 
 # Define Modal app
 app = modal.App("katago")
@@ -126,7 +125,7 @@ image = (
 
 @app.function(
     image=image,
-    gpu="T4",  # KataGo needs GPU
+    gpu="A10",  # KataGo needs GPU
     timeout=600,  # 10 minutes timeout
     memory=4096,  # 4GB memory
     volumes={str(MODEL_DIR): katago_models_volume},  # Mount Volume for models
