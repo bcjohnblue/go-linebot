@@ -186,7 +186,7 @@ async def process_review_results(
                     gcs_gif_path = (
                         f"target_{target_id}/reviews/{task_id}_{gif_filename}"
                     )
-                    await upload_file(gif_path, gcs_gif_path)
+                    await upload_file(gif_path, gcs_gif_path, cache_control="no-cache, max-age=0")
                     gif_map[move_number] = gcs_gif_path
                     logger.info(f"Uploaded GIF to: {gcs_gif_path}")
 
@@ -197,7 +197,11 @@ async def process_review_results(
                 gcs_global_board_path = (
                     f"target_{target_id}/reviews/{task_id}_global_board.png"
                 )
-                await upload_file(str(global_board_path), gcs_global_board_path)
+                await upload_file(
+                    str(global_board_path),
+                    gcs_global_board_path,
+                    cache_control="no-cache, max-age=0",
+                )
                 logger.info(f"Uploaded global board to: {gcs_global_board_path}")
 
             # 发送全局棋盘图给用户（如果可用）

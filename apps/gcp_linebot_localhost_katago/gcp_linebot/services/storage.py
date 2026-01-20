@@ -11,9 +11,13 @@ storage_client = storage.Client(
 bucket = storage_client.bucket(config["gcs"]["bucket_name"])
 
 
-async def upload_file(local_path: str, remote_path: str) -> str:
+async def upload_file(
+    local_path: str, remote_path: str, cache_control: str | None = None
+) -> str:
     """Upload file to GCS"""
     blob = bucket.blob(remote_path)
+    if cache_control:
+        blob.cache_control = cache_control
     # 在後台線程執行同步上傳操作，避免阻塞事件循環
     await asyncio.to_thread(blob.upload_from_filename, local_path)
     return f"gs://{config['gcs']['bucket_name']}/{remote_path}"
