@@ -1,202 +1,122 @@
-# Go LINE Bot - KataGo Analysis with GCP
+# Go LINE Bot - KataGo Analysis & Go Game
 
-這是一個 LINE Bot，用於接收 SGF 棋譜檔案並執行 KataGo 分析，提供 AI 覆盤與評論功能。
+這是一個 LINE Bot，提供圍棋對弈和 KataGo AI 覆盤分析功能
 
 ## 功能特色
 
-- 📱 透過 LINE Bot 接收 SGF 棋譜檔案
-- 🤖 使用 KataGo 進行全盤覆盤分析
-- 🎨 自動生成關鍵手數的 GIF 動畫
-- 💬 整合 ChatGPT 生成中文評論
-- ☁️ 支援 GCP Cloud Run 部署與本地服務分離架構
-- 📊 分析結果以 Flex Message 形式回傳至 LINE
+### 對弈功能
 
-## 架構流程
+- 在 LINE 中直接下圍棋，輸入座標（如 D4, Q16）即可落子
+- 自動判斷提子、打劫、禁手等圍棋規則
+- 自動保存棋譜為 SGF 格式
+- 支援悔棋功能
+- 支援讀取和恢復已保存的對局
+- 支援重置棋盤開始新局
 
-### 分離架構（推薦用於生產環境）
+### 覆盤分析功能
 
-```
-1. 用戶透過 LINE 上傳 SGF 檔案或發送"覆盤"指令
-2. Cloud Run 服務接收請求並上傳檔案至 GCS
-3. Cloud Run 發起請求至本地 KataGo 服務
-4. 本地服務執行 KataGo 分析（15-20 分鐘）
-5. 分析結果上傳至 GCS
-6. 本地服務回調 Cloud Run
-7. Cloud Run 進行 LLM 分析並生成 GIF
-8. 結果以 Flex Message 回傳至 LINE
-```
+- 透過 LINE Bot 接收 SGF 棋譜檔案
+- 使用 KataGo 進行全盤覆盤分析
+- 自動生成關鍵手數的 GIF 動畫
+- 整合 ChatGPT 生成中文評論
+- 支援多種部署架構（GCP Cloud Run、Modal、本地）
 
-### 本地完整架構（開發/測試用）
+## 專案架構
 
-```
-1. 用戶透過 LINE 上傳 SGF 檔案
-2. 本地服務接收並解析 SGF
-3. 執行 KataGo 分析
-4. 生成 GIF 動畫
-5. 調用 LLM 生成評論
-6. 結果回傳至 LINE
-```
+本專案提供三種不同的架構，用於不同的使用場景：
 
-## 專案結構
+### 1. `localhost_all` - 本地完整架構
 
-```
-go-linebot/
-├── apps/
-│   ├── gcp_linebot_localhost_katago/    # 分離架構
-│   │   ├── gcp_linebot/                 # Cloud Run 服務
-│   │   │   ├── main.py                  # FastAPI 主程式
-│   │   │   ├── config.py                # 設定檔
-│   │   │   ├── handlers/                # 處理器
-│   │   │   │   ├── line_handler.py      # LINE Bot 處理
-│   │   │   │   ├── sgf_handler.py       # SGF 解析
-│   │   │   │   ├── draw_handler.py      # GIF 生成
-│   │   │   │   └── board_visualizer.py # 棋盤視覺化
-│   │   │   ├── services/
-│   │   │   │   └── storage.py           # GCS 儲存服務
-│   │   │   ├── LLM/
-│   │   │   │   └── providers/           # LLM 提供者
-│   │   │   ├── Dockerfile
-│   │   │   └── requirements.txt
-│   │   └── localhost_katago/            # 本地 KataGo 服務
-│   │       ├── main.py                  # KataGo 分析服務
-│   │       ├── handlers/
-│   │       │   └── katago_handler.py    # KataGo 處理
-│   │       └── katago/                  # KataGo 相關檔案
-│   │           ├── models/              # KataGo 模型
-│   │           ├── configs/             # 設定檔
-│   │           └── analysis.py
-│   └── localhost_all/                   # 本地完整版本
-│       ├── src/
-│       │   ├── main.py
-│       │   ├── handlers/
-│       │   └── ...
-│       ├── katago/
-│       └── requirements.txt
-└── README.md
-```
+**架構說明：**
 
-## 快速開始
+- **所有服務**：全部在本地運行
+- **包含功能**：LINE Bot Webhook、KataGo 分析、GIF 生成、LLM 評論
 
-### 1. 安裝依賴
+**適用場景：**
 
-```bash
-# 進入對應的應用目錄
-cd apps/localhost_all  # 或 apps/gcp_linebot_localhost_katago/gcp_linebot
+- 一開始進行本地開發和除錯
+- 最省錢的方案，除了 LLM 評論外沒有額外花費
 
-# 建立虛擬環境（建議）
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+**詳細說明：** 請參考 [本地完整架構](apps/localhost_all/README.md)
 
-# 安裝依賴
-pip install -r requirements.txt
-```
+### 2. `gcp_linebot_localhost_katago` - GCP + 本地 KataGo 分離架構
 
-### 2. 環境設定
+**架構說明：**
 
-1. 複製 `env.example` 為 `.env` 並填入設定值：
-```bash
-cp env.example .env
-```
+- **前端服務**：GCP Cloud Run 部署的 LINE Bot Webhook 服務
+- **分析服務**：本地運行的 KataGo 分析服務
+- **儲存**：使用 GCS (Google Cloud Storage) 儲存 SGF 檔案和分析結果
 
-2. 設定必要的環境變數：
-   - `LINE_CHANNEL_ACCESS_TOKEN`: LINE Bot Channel Access Token
-   - `GCP_PROJECT_ID`: GCP 專案 ID（分離架構需要）
-   - `GCS_BUCKET_NAME`: GCS Bucket 名稱（分離架構需要）
-   - `OPENAI_API_KEY`: OpenAI API Key（LLM 功能需要）
-   - `LOCALHOST_REVIEW_URL`: 本地 KataGo 服務 URL（分離架構需要）
-   - `CLOUD_RUN_CALLBACK_REVIEW_URL`: Cloud Run 回調 URL（分離架構需要）
+**適用場景：**
 
-3. 準備 KataGo 模型檔案：
-   - 下載 KataGo 模型至 `katago/models/` 目錄
-   - 支援的模型格式：`.bin.gz`
+- 為了讓下棋功能全天運作將 LINE Bot 部署到雲端，但 KataGo 分析在本地執行
 
-### 3. 執行
+**詳細說明：** 請參考 [GCP + 本地 KataGo 分離架構](/apps/gcp_linebot_localhost_katago/README.md)
 
-#### 本地完整版本
+### 3. `gcp_linebot_modal_katago` - GCP + Modal KataGo 分離架構
 
-```bash
-cd apps/localhost_all
-python -m uvicorn src.main:app --reload --port 3000
-```
+**架構說明：**
 
-#### 分離架構
+- **前端服務**：GCP Cloud Run 部署的 LINE Bot Webhook 服務
+- **分析服務**：[Modal 平台](https://modal.com/) 運行的 KataGo 分析服務
 
-**啟動本地 KataGo 服務：**
-```bash
-cd apps/gcp_linebot_localhost_katago/localhost_katago
-python -m uvicorn main:app --reload --port 8000
-```
+**適用場景：**
 
-**啟動 Cloud Run 服務（本地測試）：**
-```bash
-cd apps/gcp_linebot_localhost_katago/gcp_linebot
-python -m uvicorn main:app --reload --port 8080
-```
+- 依靠本地電腦運行 KataGo 時間太長，Modal 平台 Starter 方案免費提供 $30/月 的運行時數，相較於本地可以將覆盤分析的時間變短
 
-**部署至 Cloud Run：**
-```bash
-cd apps/gcp_linebot_localhost_katago/gcp_linebot
-./scripts/deploy.sh
-```
+**詳細說明：** 請參考 [GCP + Modal KataGo 分離架構](apps/gcp_linebot_modal_katago/README.md)
 
 ## 使用方式
 
-1. 在 LINE 中搜尋並加入您的 Bot
-2. 上傳 `.sgf` 棋譜檔案，或發送文字指令 `覆盤`
+### 對弈功能
+
+1. 在 LINE 中搜尋並加入您的 LINE Bot
+2. 直接輸入座標開始下棋（例如：`D4`、`Q16`）
+3. Bot 會自動：
+   - 顯示當前棋盤狀態
+   - 判斷落子是否合法（檢查提子、打劫、禁手等規則）
+   - 自動保存棋譜為 SGF 格式
+   - 輪流下黑白棋
+
+**對弈指令：**
+
+- 輸入座標（如 `D4`、`Q16`）- 落子並顯示棋盤
+- `悔棋` / `undo` - 撤銷上一步
+- `讀取` / `load` - 從存檔恢復當前遊戲
+- `讀取 game_1234567890` / `load game_1234567890` - 讀取指定 game_id 的棋譜
+- `重置` / `reset` - 重置棋盤，開始新遊戲（會保存當前棋譜）
+
+### 覆盤分析功能
+
+1. 上傳 `.sgf` 棋譜檔案
+2. 發送文字指令 `覆盤`
 3. Bot 會自動執行以下流程：
    - 解析 SGF 檔案
-   - 執行 KataGo 全盤覆盤（15-20 分鐘）
+   - 執行 KataGo 全盤覆盤
    - 篩選關鍵手數（勝率差距最大的前 20 手）
    - 生成關鍵手數的 GIF 動畫
    - 使用 ChatGPT 生成中文評論
-   - 以 Flex Message 形式回傳結果
+   - 回傳結果
 
-### 指令
+**覆盤指令：**
 
-- `help` / `幫助` - 顯示說明
-- `覆盤` - 對最近上傳的 SGF 檔案進行覆盤分析
+- `覆盤` / `review` - 對最近上傳的 SGF 檔案進行覆盤分析
+
+### 通用指令
+
+- `help` / `幫助` / `說明` - 顯示完整功能說明
 
 ## 技術架構
 
 - **後端框架**: FastAPI
-- **LINE Bot SDK**: line-bot-sdk (Python)
+- **LINE Bot SDK**: line-bot-sdk
 - **圍棋引擎**: KataGo
-- **AI 分析**: OpenAI GPT
-- **GCP 服務**: 
-  - Cloud Run (Webhook 服務)
-  - Cloud Storage (GCS) - 檔案儲存
-- **圖像處理**: Pillow, imageio
-- **語言**: Python 3.8+
-
-## 功能說明
-
-### KataGo 覆盤分析
-
-- 支援全盤覆盤，分析每手棋的勝率變化
-- 可設定分析深度（visits 參數）
-- 自動篩選關鍵手數（勝率差距最大的手數）
-
-### GIF 動畫生成
-
-- 為每個關鍵手數生成 GIF 動畫
-- 顯示該手棋的落子位置與勝率變化
-- 包含全局棋盤圖
-
-### LLM 評論生成
-
-- 使用 ChatGPT 分析關鍵手數
-- 生成中文評論與建議
-- 整合至 Flex Message 顯示
-
-## 注意事項
-
-- ⚠️ KataGo 全盤覆盤需要 15-20 分鐘（視棋譜長度而定）
-- ⚠️ 需要足夠的計算資源執行 KataGo
-- ✅ 建議使用 GPU 加速 KataGo 分析
-- ✅ 分離架構適合生產環境，可獨立擴展服務
-- ✅ 所有分析結果儲存在 GCS，支援持久化
+- **LLM 評論**: ChatGPT
+- **雲端服務**:
+  - GCP Cloud Run (Webhook 服務)
+  - GCP Cloud Storage (GCS) - 檔案儲存
+  - Modal (GPU 計算平台)
 
 ## License
 
 MIT
-
