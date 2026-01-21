@@ -227,7 +227,7 @@ def draw_board(
         draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill="black")
 
     # 绘制棋子
-    stone_radius = int(cell_size * 0.4)
+    stone_radius = int(cell_size * 0.48)
     for y in range(board.size):
         for x in range(board.size):
             stone = board.get_stone(x, y)
