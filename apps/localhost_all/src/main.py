@@ -134,8 +134,8 @@ async def parse_sample_katrain():
 
         # Parse SGF content
         parsed_data = parse_sgf(sgf_content)
-        critical_moves = filter_critical_moves(parsed_data["moves"])
-        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
+        # critical_moves = filter_critical_moves(parsed_data["moves"])
+        top_score_loss_moves = get_top_winrate_diff_moves(parsed_data["moves"])
 
         # Return JSON
         return {
@@ -230,8 +230,8 @@ async def katago_draw(filename: str):
 
         result = json.loads(file_content)
 
-        critical_moves = filter_critical_moves(result["moves"])
-        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
+        # critical_moves = filter_critical_moves(result["moves"])
+        top_score_loss_moves = get_top_winrate_diff_moves(result["moves"])
 
         # Generate all GIFs
         output_dir = PROJECT_ROOT / "draw" / "outputs" / filename.replace(".json", "")
@@ -275,8 +275,8 @@ async def llm_analysis(filename: str):
         katago_data = json.loads(file_content)
 
         # Filter critical moves
-        critical_moves = filter_critical_moves(katago_data["moves"])
-        top_score_loss_moves = get_top_winrate_diff_moves(critical_moves)
+        # critical_moves = filter_critical_moves(katago_data["moves"])
+        top_score_loss_moves = get_top_winrate_diff_moves(katago_data["moves"])
 
         # Call OpenAI
         response = await call_openai(top_score_loss_moves)
