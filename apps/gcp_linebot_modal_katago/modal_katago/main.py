@@ -125,7 +125,7 @@ image = (
 
 @app.function(
     image=image,
-    gpu="A10",  # KataGo needs GPU
+    gpu="L4",  # KataGo needs GPU
     timeout=600,  # 10 minutes timeout
     memory=4096,  # 4GB memory
     volumes={str(MODEL_DIR): katago_models_volume},  # Mount Volume for models
