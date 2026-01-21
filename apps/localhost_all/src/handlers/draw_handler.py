@@ -34,18 +34,12 @@ async def draw_all_moves_gif(json_file_path: str, output_dir: str = None) -> Lis
     if not os.path.exists(json_file_path):
         raise FileNotFoundError(f"JSON file not found: {json_file_path}")
     
-    # Check if virtual environment exists
-    venv_python = draw_dir / "venv" / "bin" / "python3"
-    if not venv_python.exists():
-        raise FileNotFoundError(
-            f"Virtual environment not found: {venv_python}\n"
-            f"Please create it with: python3 -m venv {draw_dir / 'venv'} && "
-            f"{venv_python} -m pip install -r {draw_dir / 'requirements.txt'}"
-        )
+    # Use the current Python interpreter (same as the running process)
+    python_executable = sys.executable
     
-    # Use Python interpreter from virtual environment to call script
+    # Use Python interpreter to call script
     process = await asyncio.create_subprocess_exec(
-        str(venv_python),
+        python_executable,
         str(python_script),
         json_file_path,
         output_dir,
