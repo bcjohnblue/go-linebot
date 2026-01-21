@@ -475,6 +475,200 @@ def draw_global_board(all_moves_data, output_path):
     print(f"Global board saved: {filename}")
 
 
+def draw_winrate_chart(all_moves_data, output_path):
+    """绘制全局胜率变化图"""
+    if not all_moves_data:
+        return
+    
+    # 提取胜率数据（使用 winrate_after，表示每手之后的胜率）
+    # winrate_after 是當下那一方的勝率，黑棋直接使用，白棋要用 100 - winrate_after
+    moves = []
+    winrates = []
+    for move_data in all_moves_data:
+        move_number = move_data.get("move")
+        winrate_after = move_data.get("winrate_after")
+        color = move_data.get("color", "B")
+        if move_number is not None and winrate_after is not None:
+            moves.append(move_number)
+            # 如果是黑棋，直接使用 winrate_after；如果是白棋，使用 100 - winrate_after
+            if color == "B":
+                winrates.append(winrate_after)
+            else:  # W
+                winrates.append(100 - winrate_after)
+    
+    if not moves:
+        print("No winrate data available for chart")
+        return
+    
+    # 图像尺寸
+    img_width = 1200
+    img_height = 600
+    margin_left = 80
+    margin_right = 40
+    margin_top = 60
+    margin_bottom = 80
+    
+    # 绘图区域
+    chart_width = img_width - margin_left - margin_right
+    chart_height = img_height - margin_top - margin_bottom
+    
+    # 创建图像（白色背景）
+    img = Image.new("RGB", (img_width, img_height), color="#ffffff")
+    draw = ImageDraw.Draw(img)
+    
+    # 加载字体（增大字體）
+    try:
+        title_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 32)
+        label_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
+        tick_font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
+    except:
+        try:
+            title_font = ImageFont.truetype("arial.ttf", 32)
+            label_font = ImageFont.truetype("arial.ttf", 20)
+            tick_font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            title_font = ImageFont.load_default()
+            label_font = ImageFont.load_default()
+            tick_font = ImageFont.load_default()
+    
+    # 颜色方案（白色背景）
+    bg_color = "#ffffff"  # 白色背景
+    grid_color = "#e0e0e0"  # 网格线颜色（淺灰色）
+    text_color = "#333333"  # 文字颜色（深灰色）
+    title_color = "#000000"  # 标题颜色（黑色）
+    line_color = "#00aa55"  # 曲线颜色（鮮艷的綠色）
+    point_color = "#008844"  # 数据点颜色（稍深的綠色）
+    
+    # 绘制标题
+    title = "Win Rate"
+    title_bbox = draw.textbbox((0, 0), title, font=title_font)
+    title_width = title_bbox[2] - title_bbox[0]
+    draw.text((margin_left, 20), title, fill=title_color, font=title_font)
+    
+    # 计算坐标范围
+    min_move = min(moves)
+    max_move = max(moves)
+    min_winrate = 0
+    max_winrate = 100
+    
+    # 绘制网格线（水平线，表示胜率）
+    for i in range(5):
+        y_percent = i / 4.0
+        y = margin_top + chart_height * (1 - y_percent)
+        winrate_value = min_winrate + (max_winrate - min_winrate) * y_percent
+        draw.line(
+            [(margin_left, y), (margin_left + chart_width, y)],
+            fill=grid_color,
+            width=1
+        )
+        # 绘制Y轴标签
+        label = f"{int(winrate_value)}%"
+        label_bbox = draw.textbbox((0, 0), label, font=tick_font)
+        label_width = label_bbox[2] - label_bbox[0]
+        draw.text(
+            (margin_left - label_width - 10, y - 8),
+            label,
+            fill=text_color,
+            font=tick_font
+        )
+    
+    # 绘制X轴标签（手数）- 显示 10, 20, 30, ...（不包含 1）
+    x_ticks = []
+    # 生成 10, 20, 30, ... 这样的标签（從 10 開始）
+    tick = 10
+    while tick <= max_move:
+        if tick >= min_move:
+            x_ticks.append(tick)
+        tick += 10  # 10, 20, 30, ...
+    
+    # 创建 move_num 到索引的映射
+    move_to_idx = {move_num: idx for idx, move_num in enumerate(moves)}
+    
+    for move_num in x_ticks:
+        if move_num in move_to_idx:
+            idx = move_to_idx[move_num]
+            x_percent = idx / (len(moves) - 1) if len(moves) > 1 else 0
+            x = margin_left + chart_width * x_percent
+            label = str(move_num)
+            label_bbox = draw.textbbox((0, 0), label, font=tick_font)
+            label_width = label_bbox[2] - label_bbox[0]
+            draw.text(
+                (x - label_width // 2, margin_top + chart_height + 10),
+                label,
+                fill=text_color,
+                font=tick_font
+            )
+    
+    # 绘制平滑胜率曲线
+    if len(moves) > 1:
+        # 计算原始点坐标
+        points = []
+        for i, (move_num, winrate) in enumerate(zip(moves, winrates)):
+            x_percent = i / (len(moves) - 1) if len(moves) > 1 else 0
+            y_percent = (winrate - min_winrate) / (max_winrate - min_winrate) if max_winrate > min_winrate else 0.5
+            x = margin_left + chart_width * x_percent
+            y = margin_top + chart_height * (1 - y_percent)
+            points.append((x, y))
+        
+        # 使用 Catmull-Rom 插值生成平滑曲线
+        def catmull_rom_spline(p0, p1, p2, p3, t):
+            """Catmull-Rom 样条插值"""
+            t2 = t * t
+            t3 = t2 * t
+            
+            x = 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + 
+                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + 
+                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + 
+                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + 
+                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            return (x, y)
+        
+        # 生成平滑曲线点
+        smooth_points = []
+        num_segments = 20  # 每段之间的插值点数
+        
+        for i in range(len(points) - 1):
+            # 获取控制点
+            p0 = points[max(0, i - 1)]
+            p1 = points[i]
+            p2 = points[i + 1]
+            p3 = points[min(len(points) - 1, i + 2)]
+            
+            # 生成插值点
+            for j in range(num_segments):
+                t = j / num_segments
+                smooth_points.append(catmull_rom_spline(p0, p1, p2, p3, t))
+        
+        # 添加最后一个点
+        if smooth_points:
+            smooth_points.append(points[-1])
+        
+        # 绘制平滑曲线（更粗的線條）
+        if len(smooth_points) > 1:
+            for i in range(len(smooth_points) - 1):
+                draw.line([smooth_points[i], smooth_points[i + 1]], fill=line_color, width=4)
+    else:
+        # 只有一个数据点，只绘制線條（不繪製點）
+        pass
+    
+    # 绘制X轴标签
+    x_label = "Move"
+    x_label_bbox = draw.textbbox((0, 0), x_label, font=label_font)
+    x_label_width = x_label_bbox[2] - x_label_bbox[0]
+    draw.text(
+        (margin_left + chart_width // 2 - x_label_width // 2, img_height - 40),
+        x_label,
+        fill=text_color,
+        font=label_font
+    )
+    
+    # 保存图像
+    img.save(output_path)
+    filename = os.path.basename(output_path)
+    print(f"Winrate chart saved: {filename}")
+
+
 def create_gif_for_move(move_data, all_moves_data, output_path):
     """为单个 move 创建 GIF 动画"""
     move_number = move_data["move"]
@@ -653,6 +847,10 @@ def main():
     # 先绘制全局棋盘
     global_board_path = os.path.join(output_dir, "global_board.png")
     draw_global_board(all_moves, global_board_path)
+    
+    # 绘制胜率变化图
+    winrate_chart_path = os.path.join(output_dir, "winrate_chart.png")
+    draw_winrate_chart(all_moves, winrate_chart_path)
 
     # 为每个 top move 生成 GIF
     for move_data in top_moves:

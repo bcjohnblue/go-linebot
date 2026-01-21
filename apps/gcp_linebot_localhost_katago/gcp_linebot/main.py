@@ -206,25 +206,53 @@ async def process_review_results(
                 )
                 logger.info(f"Uploaded global board to: {gcs_global_board_path}")
 
-            # 发送全局棋盘图给用户（如果可用）
+            # 上传胜率图（如果有的话）
+            winrate_chart_path = output_dir / "winrate_chart.png"
+            gcs_winrate_chart_path = None
+            if winrate_chart_path.exists():
+                gcs_winrate_chart_path = (
+                    f"target_{target_id}/reviews/{task_id}_winrate_chart.png"
+                )
+                await upload_file(
+                    str(winrate_chart_path),
+                    gcs_winrate_chart_path,
+                    cache_control="no-cache, max-age=0",
+                )
+                logger.info(f"Uploaded winrate chart to: {gcs_winrate_chart_path}")
+
+            # 发送全局棋盘图和胜率图给用户（合并为一次发送）
             from services.storage import get_public_url
             from handlers.line_handler import is_valid_https_url, encode_url_path
 
+            messages = []
+            
+            # Add global board if available
             if gcs_global_board_path:
                 global_board_url = get_public_url(gcs_global_board_path)
                 if is_valid_https_url(global_board_url):
-                    await send_message(
-                        target_id,
-                        None,
-                        [
-                            TextMessage(text="🗺️ 全盤手順圖："),
-                            ImageMessage(
-                                original_content_url=global_board_url,
-                                preview_image_url=global_board_url,
-                            ),
-                        ],
-                    )
-                    await asyncio.sleep(1)  # 避免发送太快
+                    messages.extend([
+                        TextMessage(text="🗺️ 全盤手順圖："),
+                        ImageMessage(
+                            original_content_url=global_board_url,
+                            preview_image_url=global_board_url,
+                        ),
+                    ])
+            
+            # Add winrate chart if available
+            if gcs_winrate_chart_path:
+                winrate_chart_url = get_public_url(gcs_winrate_chart_path)
+                if is_valid_https_url(winrate_chart_url):
+                    messages.extend([
+                        TextMessage(text="📈 勝率變化圖："),
+                        ImageMessage(
+                            original_content_url=winrate_chart_url,
+                            preview_image_url=winrate_chart_url,
+                        ),
+                    ])
+            
+            # Send all messages in one call if any available
+            if messages:
+                await send_message(target_id, None, messages)
 
             # 创建评论映射（手数 -> LLM 生成的评论）
             comment_map = {item["move"]: item["comment"] for item in llm_comments}

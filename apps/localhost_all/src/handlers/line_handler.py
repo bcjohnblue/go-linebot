@@ -425,17 +425,37 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
                 # Validate built URL is valid
                 if is_valid_https_url(global_board_url):
-                    await send_message(
-                        target_id,
-                        None,
-                        [
-                            TextMessage(text="🗺️ 全盤手順圖："),
+                    # Check if winrate chart exists
+                    winrate_chart_path = output_dir / "winrate_chart.png"
+                    winrate_chart_url = None
+                    if winrate_chart_path.exists():
+                        relative_path = str(winrate_chart_path).split("/draw/outputs/")[1]
+                        encoded_path = encode_url_path(relative_path)
+                        winrate_chart_url = f"{public_url}/draw/outputs/{encoded_path}"
+                        if not is_valid_https_url(winrate_chart_url):
+                            winrate_chart_url = None
+                    
+                    # Build messages array
+                    messages = [
+                        TextMessage(text="🗺️ 全盤手順圖："),
+                        ImageMessage(
+                            original_content_url=global_board_url,
+                            preview_image_url=global_board_url,
+                        ),
+                    ]
+                    
+                    # Add winrate chart if available
+                    if winrate_chart_url:
+                        messages.extend([
+                            TextMessage(text="📈 勝率變化圖："),
                             ImageMessage(
-                                original_content_url=global_board_url,
-                                preview_image_url=global_board_url,
+                                original_content_url=winrate_chart_url,
+                                preview_image_url=winrate_chart_url,
                             ),
-                        ],
-                    )
+                        ])
+                    
+                    # Send all messages in one call
+                    await send_message(target_id, None, messages)
                 else:
                     logger.warning(
                         f"Invalid HTTPS URL for global board: {global_board_url}"
