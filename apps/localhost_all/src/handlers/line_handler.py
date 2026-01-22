@@ -40,6 +40,7 @@ blob_api = MessagingApiBlob(api_client)
 
 current_sgf_file_name: Optional[str] = None
 bot_user_id: Optional[str] = None
+bot_display_name: Optional[str] = None
 
 # Game state management (per user/group/room)
 # Key: target_id (userId/groupId/roomId), Value: game state dict
@@ -58,15 +59,31 @@ visualizer = BoardVisualizer(assets_dir=str(assets_dir))
 
 # Get Bot's own User ID
 async def init_bot_user_id():
-    global bot_user_id
+    global bot_user_id, bot_display_name
     try:
         # Run synchronous call in thread pool
         # get_bot_info doesn't require a request object in v3 API
         bot_info = await asyncio.to_thread(line_bot_api.get_bot_info)
         bot_user_id = bot_info.user_id
-        logger.info(f"Bot User ID: {bot_user_id}")
+        bot_display_name = bot_info.display_name
+        logger.info(f"Bot User ID: {bot_user_id}, Display Name: {bot_display_name}")
     except Exception as error:
         logger.error(f"Failed to get bot info: {error}", exc_info=True)
+
+
+async def get_bot_display_name() -> Optional[str]:
+    """Get bot display name (cached, initialized by init_bot_user_id)"""
+    global bot_display_name
+    if bot_display_name is None:
+        # If not initialized, try to get it
+        try:
+            bot_info = await asyncio.to_thread(line_bot_api.get_bot_info)
+            bot_display_name = bot_info.display_name
+            logger.debug(f"Bot Display Name: {bot_display_name}")
+        except Exception as error:
+            logger.error(f"Failed to get bot info: {error}", exc_info=True)
+            return None
+    return bot_display_name
 
 
 def is_valid_https_url(url: str) -> bool:
@@ -335,7 +352,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
         # Execute KataGo analysis
         print(f"Starting KataGo analysis for: {sgf_path}")
-        result = await run_katago_analysis(str(sgf_path), visits=200)
+        result = await run_katago_analysis(str(sgf_path), visits=5)
 
         # Check if analysis was successful
         if not result.get("success"):
@@ -1230,57 +1247,74 @@ async def handle_text_message(event: Dict[str, Any]):
 
     # In group/room, only process mention messages
     if source.get("type") in ["group", "room"]:
-        # Check if there's a mention
-        mention = message.get("mention")
-        if (
-            not mention
-            or not mention.get("mentionees")
-            or len(mention["mentionees"]) == 0
-        ):
-            # No mention, ignore this message
-            return
+        # First, check if text starts with "@{bot_display_name}" (text mention for desktop LINE)
+        bot_display_name = await get_bot_display_name()
+        text_mention_matched = False
+        if bot_display_name:
+            # Escape special regex characters in bot display name
+            escaped_display_name = re.escape(bot_display_name)
+            text_mention_pattern = rf"^@{escaped_display_name}\s+(.+)$"
+            text_mention_match = re.match(text_mention_pattern, text, re.IGNORECASE)
+            
+            if text_mention_match:
+                # Extract command after @{bot_display_name}
+                text = text_mention_match.group(1).strip()
+                text_mention_matched = True
+        else:
+            logger.error("Failed to get bot display_name, skipping text mention check")
+        
+        # Fallback to mention API (for mobile LINE) if text mention didn't match
+        if not text_mention_matched:
+            mention = message.get("mention")
+            if (
+                not mention
+                or not mention.get("mentionees")
+                or len(mention["mentionees"]) == 0
+            ):
+                # No mention and no text mention, ignore this message
+                return
 
-        # Check if mention includes bot itself
-        mentions = mention["mentionees"]
+            # Check if mention includes bot itself
+            mentions = mention["mentionees"]
 
-        # Initialize bot_user_id if not set
-        if bot_user_id is None:
-            logger.warning("bot_user_id is None, initializing...")
-            await init_bot_user_id()
+            # Initialize bot_user_id if not set
+            if bot_user_id is None:
+                logger.warning("bot_user_id is None, initializing...")
+                await init_bot_user_id()
 
-        # Check if bot is mentioned using userId or isSelf field
-        is_bot_mentioned = False
-        for mentionee in mentions:
-            # Check by userId match
-            if bot_user_id and mentionee.get("userId") == bot_user_id:
-                is_bot_mentioned = True
-                break
-            # Also check isSelf field as fallback (when bot mentions itself)
-            if mentionee.get("isSelf", False):
-                is_bot_mentioned = True
-                logger.info(f"Bot mentioned via isSelf field: {mentionee}")
-                break
+            # Check if bot is mentioned using userId or isSelf field
+            is_bot_mentioned = False
+            for mentionee in mentions:
+                # Check by userId match
+                if bot_user_id and mentionee.get("userId") == bot_user_id:
+                    is_bot_mentioned = True
+                    break
+                # Also check isSelf field as fallback (when bot mentions itself)
+                if mentionee.get("isSelf", False):
+                    is_bot_mentioned = True
+                    logger.info(f"Bot mentioned via isSelf field: {mentionee}")
+                    break
 
-        if not is_bot_mentioned:
-            # Mention is not bot, ignore this message
-            logger.warning(
-                f"Mention check failed: bot_user_id={bot_user_id}, "
-                f"mention_userIds={[m.get('userId') for m in mentions]}, "
-                f"isSelf_flags={[m.get('isSelf', False) for m in mentions]}"
-            )
-            return
+            if not is_bot_mentioned:
+                # Mention is not bot, ignore this message
+                logger.warning(
+                    f"Mention check failed: bot_user_id={bot_user_id}, "
+                    f"mention_userIds={[m.get('userId') for m in mentions]}, "
+                    f"isSelf_flags={[m.get('isSelf', False) for m in mentions]}"
+                )
+                return
 
-        # Remove mention markers to get actual command
-        clean_text = text
-        # Sort mentions by index descending to avoid index position changes
-        for mention_obj in sorted(
-            mentions, key=lambda x: x.get("index", 0), reverse=True
-        ):
-            index = mention_obj.get("index", 0)
-            length = mention_obj.get("length", 0)
-            clean_text = clean_text[:index] + clean_text[index + length :]
+            # Remove mention markers to get actual command
+            clean_text = text
+            # Sort mentions by index descending to avoid index position changes
+            for mention_obj in sorted(
+                mentions, key=lambda x: x.get("index", 0), reverse=True
+            ):
+                index = mention_obj.get("index", 0)
+                length = mention_obj.get("length", 0)
+                clean_text = clean_text[:index] + clean_text[index + length :]
 
-        text = clean_text.strip()
+            text = clean_text.strip()
 
     if text in ["help", "幫助", "說明"]:
         request = ReplyMessageRequest(

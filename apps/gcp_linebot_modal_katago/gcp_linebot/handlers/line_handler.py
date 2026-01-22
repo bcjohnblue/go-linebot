@@ -134,6 +134,9 @@ async def load_sgf_file_path(target_id: str) -> Optional[Dict[str, str]]:
         return None
 
 
+# Bot info cache
+_bot_display_name: Optional[str] = None
+
 # Get Bot's own User ID
 async def get_bot_user_id() -> Optional[str]:
     """Get bot user ID directly from LINE API"""
@@ -142,6 +145,22 @@ async def get_bot_user_id() -> Optional[str]:
         bot_user_id = bot_info.user_id
         logger.debug(f"Bot User ID: {bot_user_id}")
         return bot_user_id
+    except Exception as error:
+        logger.error(f"Failed to get bot info: {error}", exc_info=True)
+        return None
+
+
+async def get_bot_display_name() -> Optional[str]:
+    """Get bot display name directly from LINE API (cached)"""
+    global _bot_display_name
+    if _bot_display_name is not None:
+        return _bot_display_name
+    
+    try:
+        bot_info = await asyncio.to_thread(line_bot_api.get_bot_info)
+        _bot_display_name = bot_info.display_name
+        logger.debug(f"Bot Display Name: {_bot_display_name}")
+        return _bot_display_name
     except Exception as error:
         logger.error(f"Failed to get bot info: {error}", exc_info=True)
         return None
@@ -1312,40 +1331,57 @@ async def handle_text_message(event: Dict[str, Any]):
 
     # In group/room, only process mention messages
     if source.get("type") in ["group", "room"]:
-        # Check if there's a mention
-        mention = message.get("mention")
-        if (
-            not mention
-            or not mention.get("mentionees")
-            or len(mention["mentionees"]) == 0
-        ):
-            # No mention, ignore this message
-            return
+        # First, check if text starts with "@{bot_display_name}" (text mention for desktop LINE)
+        bot_display_name = await get_bot_display_name()
+        text_mention_matched = False
+        if bot_display_name:
+            # Escape special regex characters in bot display name
+            escaped_display_name = re.escape(bot_display_name)
+            text_mention_pattern = rf"^@{escaped_display_name}\s+(.+)$"
+            text_mention_match = re.match(text_mention_pattern, text, re.IGNORECASE)
+            
+            if text_mention_match:
+                # Extract command after @{bot_display_name}
+                text = text_mention_match.group(1).strip()
+                text_mention_matched = True
+        else:
+            logger.error("Failed to get bot display_name, skipping text mention check")
+        
+        # Fallback to mention API (for mobile LINE) if text mention didn't match
+        if not text_mention_matched:
+            mention = message.get("mention")
+            if (
+                not mention
+                or not mention.get("mentionees")
+                or len(mention["mentionees"]) == 0
+            ):
+                # No mention and no text mention, ignore this message
+                return
 
-        # Check if mention includes bot itself
-        mentions = mention["mentionees"]
-        bot_user_id = await get_bot_user_id()
-        is_bot_mentioned = (
-            any(mentionee.get("userId") == bot_user_id for mentionee in mentions)
-            if bot_user_id
-            else False
-        )
+            # Check if mention includes bot itself
+            mentions = mention["mentionees"]
+            bot_user_id = await get_bot_user_id()
+            is_bot_mentioned = (
+                any(mentionee.get("userId") == bot_user_id for mentionee in mentions)
+                if bot_user_id
+                else False
+            )
 
-        if not is_bot_mentioned:
-            # Mention is not bot, ignore this message
-            return
+            if not is_bot_mentioned:
+                # Mention is not bot, ignore this message
+                return
 
-        # Remove mention markers to get actual command
-        clean_text = text
-        # Sort mentions by index descending to avoid index position changes
-        for mention_obj in sorted(
-            mentions, key=lambda x: x.get("index", 0), reverse=True
-        ):
-            index = mention_obj.get("index", 0)
-            length = mention_obj.get("length", 0)
-            clean_text = clean_text[:index] + clean_text[index + length :]
+            # Remove mention markers to get actual command
+            clean_text = text
+            # Sort mentions by index descending to avoid index position changes
+            for mention_obj in sorted(
+                mentions, key=lambda x: x.get("index", 0), reverse=True
+            ):
+                index = mention_obj.get("index", 0)
+                length = mention_obj.get("length", 0)
+                clean_text = clean_text[:index] + clean_text[index + length :]
 
-        text = clean_text.strip()
+            text = clean_text.strip()
 
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
