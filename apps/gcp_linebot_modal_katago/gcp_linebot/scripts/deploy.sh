@@ -50,7 +50,7 @@ fi
 
 # 設定環境變數預設值（可透過環境變數覆蓋）
 CLOUD_RUN_CALLBACK_REVIEW_URL=${CLOUD_RUN_CALLBACK_REVIEW_URL:-"https://go-linebot-webhook-731821281792.asia-east1.run.app/callback/review"}
-GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-"go-linebot-files"}
+GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-"go-line-bot-files"}
 MODAL_APP_NAME=${MODAL_APP_NAME:-"katago"}
 MODAL_FUNCTION_REVIEW=${MODAL_FUNCTION_REVIEW:-"review"}
 KATAGO_VISITS=${KATAGO_VISITS:-"5"}

@@ -51,7 +51,7 @@ fi
 # 設定環境變數預設值（可透過環境變數覆蓋）
 LOCALHOST_REVIEW_URL=${LOCALHOST_REVIEW_URL:-"https://assumption-coated-extensions-toys.trycloudflare.com/review"}
 CLOUD_RUN_CALLBACK_REVIEW_URL=${CLOUD_RUN_CALLBACK_REVIEW_URL:-"https://go-linebot-webhook-731821281792.asia-east1.run.app/callback/review"}
-GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-"go-linebot-files"}
+GCS_BUCKET_NAME=${GCS_BUCKET_NAME:-"go-line-bot-files"}
 
 # 驗證必要環境變數
 if [ -z "$GCS_BUCKET_NAME" ]; then
