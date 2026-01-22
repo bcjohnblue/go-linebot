@@ -68,6 +68,12 @@
 
 ## 使用方式
 
+### 通用指令
+
+- `help` / `幫助` / `說明` - 顯示完整功能說明
+
+<img src="public/help_1.jpg" alt="說明功能 1" width="300"> <img src="public/help_2.jpg" alt="說明功能 2" width="300">
+
 ### 對弈功能
 
 1. 在 LINE 中搜尋並加入您的 LINE Bot
@@ -77,6 +83,8 @@
    - 判斷落子是否合法（檢查提子、打劫、禁手等規則）
    - 自動保存棋譜為 SGF 格式
    - 輪流下黑白棋
+
+<img src="public/play.jpg" alt="對弈功能" width="300">
 
 **對弈指令：**
 
@@ -98,13 +106,13 @@
    - 使用 ChatGPT 生成中文評論
    - 回傳結果
 
+<img src="public/review_1.jpg" alt="覆盤結果 1" width="300"> <img src="public/review_2.jpg" alt="覆盤結果 2" width="300">
+
+<img src="public/review_3.jpg" alt="覆盤結果 3" width="300"> <img src="public/move_227.gif" alt="AI 分析最佳步數" width="300">
+
 **覆盤指令：**
 
 - `覆盤` / `review` - 對最近上傳的 SGF 檔案進行覆盤分析
-
-### 通用指令
-
-- `help` / `幫助` / `說明` - 顯示完整功能說明
 
 ## 技術架構
 
