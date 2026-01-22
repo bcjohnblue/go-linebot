@@ -120,8 +120,8 @@ async def process_review_results(
         logger.info("Preparing to call OpenAI...")
 
         # 调用 LLM (OpenAI) 生成评论
-        # llm_comments = await call_openai(top_moves)
-        llm_comments = []
+        llm_comments = await call_openai(top_moves)
+        # llm_comments = []
         logger.info(f"LLM generated {len(llm_comments)} comments")
 
         # 从回调数据中获取 JSON 文件在 GCS 中的路径
