@@ -2,6 +2,7 @@ import asyncio
 from typing import Optional
 from google.cloud import storage
 from config import config
+from logger import logger
 
 storage_client = storage.Client(
     project=config["gcp"]["project_id"],
@@ -9,6 +10,9 @@ storage_client = storage.Client(
 )
 
 bucket = storage_client.bucket(config["gcs"]["bucket_name"])
+
+# Auth bucket for storing authentication tokens
+auth_bucket = storage_client.bucket(config["auth"]["bucket_name"])
 
 
 async def upload_file(local_path: str, remote_path: str, cache_control: str | None = None) -> str:
@@ -112,3 +116,76 @@ def get_public_url(remote_path: str) -> str:
 
     encoded_path = "/".join(quote(part, safe="") for part in remote_path.split("/"))
     return f"https://storage.googleapis.com/{bucket_name}/{encoded_path}"
+
+
+# ============================================================================
+# Auth-related storage functions for go-linebot-auth bucket
+# ============================================================================
+
+
+async def save_auth_token(target_id: str, token: str) -> bool:
+    """Save auth token to go-linebot-auth bucket
+    
+    Args:
+        target_id: The target ID (user/group/room)
+        token: The auth token to save
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        remote_path = f"target_{target_id}/auth.txt"
+        token_bytes = token.encode("utf-8")
+        blob = auth_bucket.blob(remote_path)
+        await asyncio.to_thread(blob.upload_from_string, token_bytes, content_type="text/plain")
+        logger.info(f"Saved auth token for {target_id} to auth bucket")
+        return True
+    except Exception as error:
+        logger.error(f"Failed to save auth token for {target_id}: {error}", exc_info=True)
+        return False
+
+
+async def load_auth_token(target_id: str) -> Optional[str]:
+    """Load auth token from go-linebot-auth bucket
+    
+    Args:
+        target_id: The target ID (user/group/room)
+        
+    Returns:
+        The auth token if exists, None otherwise
+    """
+    try:
+        remote_path = f"target_{target_id}/auth.txt"
+        blob = auth_bucket.blob(remote_path)
+        exists = await asyncio.to_thread(lambda: blob.exists())
+        if not exists:
+            return None
+        
+        token_text = await asyncio.to_thread(lambda: blob.download_as_text(encoding="utf-8"))
+        logger.debug(f"Loaded auth token for {target_id} from auth bucket")
+        return token_text.strip()
+    except Exception as error:
+        logger.error(f"Failed to load auth token for {target_id}: {error}", exc_info=True)
+        return None
+
+
+async def check_auth(target_id: str, secret_token: str) -> bool:
+    """Check if the stored auth token matches the secret token
+    
+    Args:
+        target_id: The target ID (user/group/room)
+        secret_token: The secret token to compare against
+        
+    Returns:
+        True if auth token exists and matches, False otherwise
+    """
+    try:
+        stored_token = await load_auth_token(target_id)
+        if stored_token is None:
+            return False
+        
+        # Compare tokens securely (constant-time comparison)
+        return stored_token == secret_token
+    except Exception as error:
+        logger.error(f"Failed to check auth for {target_id}: {error}", exc_info=True)
+        return False

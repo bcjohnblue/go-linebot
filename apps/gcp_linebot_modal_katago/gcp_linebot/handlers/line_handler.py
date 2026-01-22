@@ -388,6 +388,9 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 
+🔐 認證功能：
+• auth <token> / 認證 <token> - 進行認證以使用覆盤功能
+
 📊 覆盤分析功能：
 • 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
 
@@ -462,6 +465,55 @@ async def send_message(
     return False  # Used pushMessage
 
 
+async def handle_auth_command(target_id: str, reply_token: Optional[str], token: str):
+    """Handle auth command - Verify token and save to auth bucket"""
+    try:
+        from services.storage import save_auth_token
+        
+        # Get AUTH_TOKEN from config
+        auth_token = config.get("auth", {}).get("token")
+        
+        if not auth_token:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 系統配置錯誤：未設定 AUTH_TOKEN")],
+            )
+            return
+        
+        # Compare user input token with secret token
+        if token.strip() != auth_token:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 認證失敗：金鑰不正確")],
+            )
+            return
+        
+        # Save token to auth bucket
+        success = await save_auth_token(target_id, token.strip())
+        
+        if success:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="✅ 認證成功！現在可以使用覆盤功能。")],
+            )
+        else:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 認證失敗：無法儲存認證資訊")],
+            )
+    except Exception as error:
+        logger.error(f"Error in auth command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 執行認證時發生錯誤：{str(error)}")],
+        )
+
+
 async def handle_review_command(target_id: str, reply_token: Optional[str]):
     """Handle review command - Call Modal function for review"""
     import uuid
@@ -470,6 +522,22 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
     used_reply_token = False
 
     try:
+        # Check authentication only if AUTH_TOKEN is configured
+        auth_token = config.get("auth", {}).get("token")
+        if auth_token:
+            # AUTH_TOKEN is configured, require authentication
+            from services.storage import check_auth
+            
+            # Verify authentication
+            is_authenticated = await check_auth(target_id, auth_token)
+            if not is_authenticated:
+                used_reply_token = await send_message(
+                    target_id,
+                    reply_token,
+                    [TextMessage(text="❌ 請先使用 'auth <token>' 指令進行認證，才可使用覆盤功能")],
+                )
+                return
+        
         # Get latest SGF file from reviews folder
         from services.storage import list_files, storage_client, bucket
 
@@ -1392,6 +1460,13 @@ async def handle_text_message(event: Dict[str, Any]):
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
         return
+
+    if "認證" in text or "auth" in text.lower():
+        auth_match = re.match(r"^(?:auth|認證)\s+(.+)$", text, re.IGNORECASE)
+        if auth_match:
+            token = auth_match.group(1).strip()
+            await handle_auth_command(target_id, reply_token, token)
+            return
 
     if text == "覆盤" or text.lower() == "review":
         await handle_review_command(target_id, reply_token)

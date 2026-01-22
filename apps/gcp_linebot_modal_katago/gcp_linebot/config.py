@@ -36,6 +36,11 @@ config = {
         "api_key": os.getenv("OPENAI_API_KEY"),
         "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     },
+    # Auth
+    "auth": {
+        "token": os.getenv("AUTH_TOKEN"),
+        "bucket_name": os.getenv("AUTH_BUCKET_NAME", "go-linebot-auth"),
+    },
 }
 
 # Validate required config
