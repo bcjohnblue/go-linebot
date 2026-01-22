@@ -139,7 +139,7 @@ def review(
     sgf_gcs_path: str,
     callback_url: str,
     target_id: str,
-    visits: int = 5,
+    visits: int = 1000,
 ) -> Dict[str, Any]:
     """
     Execute KataGo review analysis on an SGF file.

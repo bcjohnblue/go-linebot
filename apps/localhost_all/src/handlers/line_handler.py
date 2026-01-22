@@ -258,7 +258,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 覆盤使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
 2️⃣ 輸入「覆盤」開始分析
-3️⃣ 等待約 5 分鐘獲得分析結果
+3️⃣ 等待約 10 分鐘獲得分析結果
 
 覆盤分析結果包含：
 • 🗺️ 全盤手順圖 - 顯示整局棋的所有手順
@@ -267,8 +267,8 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 💬 ChatGPT 評論 - 針對關鍵手數的評論
 
 技術規格：
-• 分析引擎：KataGo AI（visits=5)
-• 分析時間：KataGo 全盤分析約 1 分鐘
+• 分析引擎：KataGo AI（visits=1000)
+• 分析時間：KataGo 全盤分析約 6 分鐘
 • 評論生成：ChatGPT 評論生成約 3 分鐘
 • 動畫繪製：GIF 動畫繪製約 10 秒
 
@@ -341,7 +341,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             reply_token,
             [
                 TextMessage(
-                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 5 分鐘...，請稍後再回來查看分析結果。"
+                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 10 分鐘...，請稍後再回來查看分析結果。"
                 )
             ],
         )

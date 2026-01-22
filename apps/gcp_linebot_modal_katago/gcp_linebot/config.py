@@ -25,7 +25,7 @@ config = {
     "modal": {
         "app_name": os.getenv("MODAL_APP_NAME", "katago"),
         "function_review": os.getenv("MODAL_FUNCTION_REVIEW", "review"),
-        "visits": int(os.getenv("KATAGO_VISITS", "5")),
+        "visits": int(os.getenv("KATAGO_VISITS", "1000")),
     },
     # Cloud Run Callback
     "cloud_run": {
