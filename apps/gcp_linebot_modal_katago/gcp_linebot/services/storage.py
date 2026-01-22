@@ -119,12 +119,12 @@ def get_public_url(remote_path: str) -> str:
 
 
 # ============================================================================
-# Auth-related storage functions for go-linebot-auth bucket
+# Auth-related storage functions for go-line-bot-auth bucket
 # ============================================================================
 
 
 async def save_auth_token(target_id: str, token: str) -> bool:
-    """Save auth token to go-linebot-auth bucket
+    """Save auth token to go-line-bot-auth bucket
     
     Args:
         target_id: The target ID (user/group/room)
@@ -146,7 +146,7 @@ async def save_auth_token(target_id: str, token: str) -> bool:
 
 
 async def load_auth_token(target_id: str) -> Optional[str]:
-    """Load auth token from go-linebot-auth bucket
+    """Load auth token from go-line-bot-auth bucket
     
     Args:
         target_id: The target ID (user/group/room)

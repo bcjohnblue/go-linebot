@@ -39,7 +39,7 @@ config = {
     # Auth
     "auth": {
         "token": os.getenv("AUTH_TOKEN"),
-        "bucket_name": os.getenv("AUTH_BUCKET_NAME", "go-linebot-auth"),
+        "bucket_name": os.getenv("AUTH_BUCKET_NAME", "go-line-bot-auth"),
     },
 }
 
