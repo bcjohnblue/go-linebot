@@ -357,32 +357,40 @@ def create_sgf_file_flex_message(file_url: str, game_id: str) -> FlexMessage:
     )
 
 
-HELP_MESSAGE = """歡迎使用圍棋分析 Bot！
+HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 
-指令：
+📋 指令列表：
 • help / 幫助 / 說明 - 顯示此說明
 
 🎮 對局功能：
 • 輸入座標（如 D4, Q16）- 落子並顯示棋盤
 • 悔棋 / undo - 撤銷上一步
-• 讀取 / load - 從存檔恢復遊戲
-• 重置 / reset - 重置棋盤，開始新遊戲
+• 讀取 / load - 從存檔恢復當前遊戲
+• 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
+• 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 
-📊 覆盤功能：
-• 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤
+📊 覆盤分析功能：
+• 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
 
-使用流程：
+覆盤使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
 2️⃣ 輸入「覆盤」開始分析
-3️⃣ 等待 10-15 分鐘獲得分析結果
+3️⃣ 等待約 5 分鐘獲得分析結果
+
+覆盤分析結果包含：
+• 🗺️ 全盤手順圖 - 顯示整局棋的所有手順
+• 📈 勝率變化圖 - 顯示黑方勝率隨手數的變化曲線
+• 🎬 關鍵手數 GIF 動畫 - 勝率差距最大的前 20 手動態演示
+• 💬 ChatGPT 評論 - 針對關鍵手數的評論
+
+技術規格：
+• 分析引擎：KataGo AI（visits=5）
+• 分析時間：KataGo 全盤分析約 1 分鐘
+• 評論生成：ChatGPT 評論生成約 3 分鐘
+• 動畫繪製：GIF 動畫繪製約 10 秒
 
 注意事項：
-• 分析使用 KataGo AI（visits=200）
-• KataGo 全盤分析約 10 分鐘
-• ChatGPT 評論生成約 1 分鐘
-• GIF 動畫繪製約 10 秒
-• 覆盤功能每次消耗 4 個推播訊息 × 群組人數
-• 每月訊息上限為 200 則，請注意使用頻率，超出上限將無法使用覆盤功能"""
+• 覆盤功能每次消耗 4 個推播訊息 × 群組人數，每月訊息上限為 200 則，請注意使用頻率，超出上限將無法使用覆盤功能"""
 
 
 async def save_sgf_file(
@@ -533,7 +541,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             reply_token,
             [
                 TextMessage(
-                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 12 分鐘...，請稍後再回來查看分析結果。"
+                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 5 分鐘...，請稍後再回來查看分析結果。"
                 )
             ],
         )
@@ -1479,7 +1487,7 @@ async def handle_file_message(event: Dict[str, Any]):
 
 📁 檔案: {file_name}
 
-棋譜已保存到伺服器，後續可執行 "@NTUGOAnalysis 覆盤" 指令進行分析..."""
+棋譜已保存到伺服器，後續可執行 "覆盤" 或 "review" 指令進行分析..."""
                 )
             ],
         )
