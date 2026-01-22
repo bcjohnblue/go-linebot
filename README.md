@@ -84,8 +84,6 @@
    - 自動保存棋譜為 SGF 格式
    - 輪流下黑白棋
 
-<img src="public/play.jpg" alt="對弈功能" width="300">
-
 **對弈指令：**
 
 - 輸入座標（如 `D4`、`Q16`）- 落子並顯示棋盤
@@ -93,6 +91,8 @@
 - `讀取` / `load` - 從存檔恢復當前遊戲
 - `讀取 game_1234567890` / `load game_1234567890` - 讀取指定 game_id 的棋譜
 - `重置` / `reset` - 重置棋盤，開始新遊戲（會保存當前棋譜）
+
+<img src="public/play.jpg" alt="對弈功能" width="300">
 
 ### 覆盤分析功能
 
@@ -106,13 +106,15 @@
    - 使用 ChatGPT 生成中文評論
    - 回傳結果
 
-<img src="public/review_1.jpg" alt="覆盤結果 1" width="300"> <img src="public/review_2.jpg" alt="覆盤結果 2" width="300">
-
-<img src="public/review_3.jpg" alt="覆盤結果 3" width="300"> <img src="public/move_227.gif" alt="AI 分析最佳步數" width="300">
-
 **覆盤指令：**
 
 - `覆盤` / `review` - 對最近上傳的 SGF 檔案進行覆盤分析
+
+<img src="public/review_01.jpg" alt="覆盤結果 1" width="300"> <img src="public/review_02.jpg" alt="覆盤結果 2" width="300">
+
+<img src="public/review_03.jpg" alt="覆盤結果 3" width="300"> <img src="public/review_04.jpg" alt="覆盤結果 3" width="300">
+
+<img src="public/move_227.gif" alt="AI 分析最佳步數" width="300">
 
 ## 技術架構
 
