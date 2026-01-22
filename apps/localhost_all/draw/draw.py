@@ -512,8 +512,9 @@ def draw_winrate_chart(all_moves_data, output_path):
     chart_width = img_width - margin_left - margin_right
     chart_height = img_height - margin_top - margin_bottom
     
-    # 创建图像（白色背景）
-    img = Image.new("RGB", (img_width, img_height), color="#ffffff")
+    # 创建图像（棋盘色背景）
+    board_bg_color = "#282828"  # 棋盘颜色（米黄色/木色）
+    img = Image.new("RGB", (img_width, img_height), color=board_bg_color)
     draw = ImageDraw.Draw(img)
     
     # 加载字体（增大字體）
@@ -531,13 +532,13 @@ def draw_winrate_chart(all_moves_data, output_path):
             label_font = ImageFont.load_default()
             tick_font = ImageFont.load_default()
     
-    # 颜色方案（白色背景）
-    bg_color = "#ffffff"  # 白色背景
-    grid_color = "#e0e0e0"  # 网格线颜色（淺灰色）
-    text_color = "#333333"  # 文字颜色（深灰色）
-    title_color = "#000000"  # 标题颜色（黑色）
-    line_color = "#00aa55"  # 曲线颜色（鮮艷的綠色）
-    point_color = "#008844"  # 数据点颜色（稍深的綠色）
+    # 颜色方案（棋盘色背景）
+    bg_color = board_bg_color  # 棋盘色背景
+    grid_color = "#e0e0e0"  # 网格线颜色（深棕色，在棋盘色背景上可见）
+    text_color = "#ffffff"  # 文字颜色（深黑色，在棋盘色背景上更明显）
+    title_color = "#ffffff"  # 标题颜色（纯黑色，更明显）
+    line_color = "#00AA55"  # 曲线颜色（鲜艳的绿色，在棋盘色背景上更明显）
+    point_color = "#008844"  # 数据点颜色（深绿色）
     
     # 绘制标题
     title = "Win Rate"
@@ -559,7 +560,7 @@ def draw_winrate_chart(all_moves_data, output_path):
         draw.line(
             [(margin_left, y), (margin_left + chart_width, y)],
             fill=grid_color,
-            width=1
+            width=2
         )
         # 绘制Y轴标签
         label = f"{int(winrate_value)}%"
@@ -644,10 +645,10 @@ def draw_winrate_chart(all_moves_data, output_path):
         if smooth_points:
             smooth_points.append(points[-1])
         
-        # 绘制平滑曲线（更粗的線條）
+        # 绘制平滑曲线（更粗的線條，在棋盘色背景上更明显）
         if len(smooth_points) > 1:
             for i in range(len(smooth_points) - 1):
-                draw.line([smooth_points[i], smooth_points[i + 1]], fill=line_color, width=4)
+                draw.line([smooth_points[i], smooth_points[i + 1]], fill=line_color, width=5)
     else:
         # 只有一个数据点，只绘制線條（不繪製點）
         pass
