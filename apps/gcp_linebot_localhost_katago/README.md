@@ -91,6 +91,18 @@ gcloud config get-value project
 
 前往 [Google Cloud Storage 設定頁面](https://console.cloud.google.com/storage/browser) 建立 bucket 以儲存 sgf 棋譜、每一手的棋盤圖片以及覆盤的 gif 圖檔
 
+**重要：GCS Bucket 需要設定為公開訪問**
+
+為了讓 LINE Bot 能夠顯示棋盤圖片，GCS Bucket 必須設定為公開訪問：
+
+1. 在 GCS Bucket 設定頁面，點選「權限」標籤
+2. 點選「新增主要項目」
+3. 在「新增主要項目」欄位中輸入 `allUsers`
+4. 選擇角色為「Storage 物件檢視者」（Storage Object Viewer）
+5. 儲存設定
+
+這樣 LINE Bot 才能正確顯示上傳到 GCS 的棋盤圖片。
+
 #### 1.4 建立 Artifact Registry
 
 前往 [Google Cloud Artifacts 設定頁面](https://console.cloud.google.com/artifacts)，建立 Artifact Registry，部署腳本會使用 Artifact Registry 來儲存 Docker 映像檔
