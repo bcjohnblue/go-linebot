@@ -388,6 +388,11 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 
+🤖 AI 對弈功能：
+• 對弈 / vs - 查看目前對弈模式狀態
+• 對弈 ai / vs ai - 開啟 AI 對弈模式（與 AI 對戰）
+• 對弈 free / vs free - 關閉 AI 對弈模式（恢復一般對弈模式）
+
 📊 覆盤分析功能：
 • 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
 
@@ -521,11 +526,16 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             )
 
         # Get localhost URL and callback URL from config
-        localhost_url = config.get("localhost", {}).get("review_url")
+        localhost_url = config.get("localhost_katago", {}).get("url")
+        if localhost_url:
+            # Ensure it ends with /review endpoint
+            if not localhost_url.endswith("/review"):
+                localhost_url = f"{localhost_url.rstrip('/')}/review"
+        
         callback_review_url = config.get("cloud_run", {}).get("callback_review_url")
 
         if not localhost_url:
-            logger.error("LOCALHOST_REVIEW_URL not configured")
+            logger.error("LOCALHOST_KATAGO_URL not configured")
             await send_message(
                 target_id,
                 reply_token,
@@ -605,10 +615,61 @@ async def get_game_id(target_id: str) -> str:
 
     # Generate new game ID (timestamp-based)
     new_game_id = f"game_{int(time.time())}"
-    # Save to GCS
-    await save_state_to_gcs(target_id, {"game_id": new_game_id, "current_turn": 1})
+    # Save to GCS, preserving existing fields like vs_ai_mode
+    existing_state = await load_state_from_gcs(target_id)
+    if existing_state is None:
+        existing_state = {}
+    existing_state["game_id"] = new_game_id
+    existing_state["current_turn"] = 1
+    await save_state_to_gcs(target_id, existing_state)
     logger.info(f"Created new game ID for {target_id}: {new_game_id}")
     return new_game_id
+
+
+async def enable_vs_ai_mode(target_id: str) -> bool:
+    """Enable VS AI mode for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            state = {}
+        
+        state["vs_ai_mode"] = True
+        success = await save_state_to_gcs(target_id, state)
+        if success:
+            logger.info(f"Enabled VS AI mode for {target_id}")
+        return success
+    except Exception as error:
+        logger.error(f"Failed to enable VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
+
+
+async def disable_vs_ai_mode(target_id: str) -> bool:
+    """Disable VS AI mode for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            state = {}
+        
+        state["vs_ai_mode"] = False
+        success = await save_state_to_gcs(target_id, state)
+        if success:
+            logger.info(f"Disabled VS AI mode for {target_id}")
+        return success
+    except Exception as error:
+        logger.error(f"Failed to disable VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
+
+
+async def is_vs_ai_mode(target_id: str) -> bool:
+    """Check if VS AI mode is enabled for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            return False
+        return state.get("vs_ai_mode", False)
+    except Exception as error:
+        logger.error(f"Failed to check VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
 
 
 async def get_game_state(target_id: str) -> Dict[str, Any]:
@@ -694,6 +755,9 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
         move_count = 0
         sequence = sgf_game.get_main_sequence()
         logger.debug(f"SGF main sequence has {len(sequence)} nodes")
+        
+        # Variables to store last move info
+        last_move_info = None
 
         for node_idx, node in enumerate(sequence):
             color, move = node.get_move()
@@ -727,16 +791,15 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
             else:
                 stone_val = 1 if color == "b" else 2
 
-            # Verify that the color matches expected turn
-            if stone_val != current_turn:
-                logger.warning(
-                    f"Move {move_count}: Color mismatch! SGF says {color} (stone_val={stone_val}), "
-                    f"but expected turn is {current_turn}. Using SGF color."
-                )
-
-            logger.info(
-                f"Restoring move {move_count}: color={color}, stone_val={stone_val}, pos=({r},{c}), expected_turn={current_turn}"
-            )
+            # Store last move info (will be logged after loop)
+            last_move_info = {
+                "move_count": move_count,
+                "color": color,
+                "stone_val": stone_val,
+                "r": r,
+                "c": c,
+                "expected_turn": current_turn
+            }
 
             # Check if position is already occupied (shouldn't happen in valid SGF, but handle it)
             if game.board[r][c] != 0:
@@ -793,8 +856,13 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
 
             # Switch turn for next move
             current_turn = 2 if stone_val == 1 else 1
-            logger.debug(
-                f"Move {move_count} complete. Next turn: {'black' if current_turn == 1 else 'white'}"
+
+        # Log only the last move
+        if last_move_info:
+            logger.info(
+                f"Restoring move {last_move_info['move_count']}: color={last_move_info['color']}, "
+                f"stone_val={last_move_info['stone_val']}, pos=({last_move_info['r']},{last_move_info['c']}), "
+                f"expected_turn={last_move_info['expected_turn']}"
             )
 
         logger.info(
@@ -892,10 +960,13 @@ async def save_game_sgf(
             cache_control="no-cache, max-age=0",
         )
 
-        # Save state metadata (game_id, current_turn) to GCS
-        await save_state_to_gcs(
-            target_id, {"game_id": game_id, "current_turn": current_turn}
-        )
+        # Save state metadata to GCS, preserving existing fields like vs_ai_mode
+        existing_state = await load_state_from_gcs(target_id)
+        if existing_state is None:
+            existing_state = {}
+        existing_state["game_id"] = game_id
+        existing_state["current_turn"] = current_turn
+        await save_state_to_gcs(target_id, existing_state)
 
         logger.info(f"Saved/Updated game SGF to {gcs_path}")
         return gcs_path
@@ -914,8 +985,14 @@ async def reset_game_state(target_id: str, reply_token: Optional[str] = None):
     # Generate new game ID for new game
     new_game_id = f"game_{int(time.time())}"
 
-    # Save new state metadata to GCS
-    await save_state_to_gcs(target_id, {"game_id": new_game_id, "current_turn": 1})
+    # Save new state metadata to GCS, preserving existing fields like vs_ai_mode
+    existing_state = await load_state_from_gcs(target_id)
+    if existing_state is None:
+        existing_state = {}
+    existing_state["game_id"] = new_game_id
+    existing_state["current_turn"] = 1
+    # Note: vs_ai_mode is preserved (not reset)
+    await save_state_to_gcs(target_id, existing_state)
 
     # Save empty SGF to GCS
     new_sgf = sgf.Sgf_game(size=19)
@@ -1010,8 +1087,62 @@ async def handle_board_move(
         except:
             pass
 
+        # Check if VS AI mode is enabled
+        vs_ai_mode = await is_vs_ai_mode(target_id)
+        
         if is_valid_https_url(image_url):
-            # Send board image
+            # If VS AI mode is enabled, don't reply immediately, wait for AI's move
+            if vs_ai_mode:
+                # Call localhost KataGo service asynchronously (non-blocking)
+                # Pass reply_token and user's board image URL so callback can send everything together
+                try:
+                    localhost_url = config.get("localhost_katago", {}).get("url")
+                    callback_get_ai_next_move_url = config.get("cloud_run", {}).get("callback_get_ai_next_move_url")
+                    
+                    if localhost_url and callback_get_ai_next_move_url:
+                        # Get SGF GCS path (save_game_sgf returns gs:// format)
+                        sgf_gcs_path = sgf_path if sgf_path and sgf_path.startswith("gs://") else None
+                        
+                        if not sgf_gcs_path:
+                            logger.error(f"Invalid SGF path: {sgf_path}")
+                        else:
+                            # Get current turn (after user's move, it's AI's turn)
+                            ai_current_turn = state["current_turn"]
+                            
+                            # Call localhost KataGo service asynchronously
+                            import httpx
+                            
+                            async def call_katago_async():
+                                try:
+                                    async with httpx.AsyncClient(timeout=60.0) as client:
+                                        response = await client.post(
+                                            f"{localhost_url}/get_ai_next_move",
+                                            json={
+                                                "sgf_gcs_path": sgf_gcs_path,
+                                                "callback_url": callback_get_ai_next_move_url,
+                                                "target_id": target_id,
+                                                "current_turn": ai_current_turn,
+                                                "reply_token": reply_token,
+                                                "user_board_image_url": image_url,
+                                            },
+                                        )
+                                        response.raise_for_status()
+                                        logger.info(f"Successfully called localhost KataGo service for VS AI: target_id={target_id}, current_turn={ai_current_turn}")
+                                except Exception as http_error:
+                                    logger.error(f"Error calling localhost KataGo service for VS AI: {http_error}", exc_info=True)
+                            
+                            # Spawn async task (non-blocking)
+                            asyncio.create_task(call_katago_async())
+                            logger.info(f"Spawned localhost KataGo service for VS AI: target_id={target_id}, current_turn={ai_current_turn}")
+                            # Don't send reply here, wait for AI callback to respond
+                            return
+                    else:
+                        logger.error("localhost_katago.url or callback_get_ai_next_move_url not configured")
+                except Exception as localhost_error:
+                    logger.error(f"Error calling localhost KataGo service for VS AI: {localhost_error}", exc_info=True)
+                    # If error, fall through to send user's move image
+            
+            # Send board image (non-VS AI mode, or error in VS AI mode)
             request = ReplyMessageRequest(
                 reply_token=reply_token,
                 messages=[
@@ -1403,6 +1534,103 @@ async def handle_text_message(event: Dict[str, Any]):
         await handle_load_game_by_id(target_id, reply_token, None)
         return
 
+    # Handle "對弈" to show current mode status
+    if text.lower() in ["對弈", "vs"]:
+        # Check current VS AI mode status
+        vs_ai_mode = await is_vs_ai_mode(target_id)
+        state_meta = await load_state_from_gcs(target_id)
+        current_turn = state_meta.get("current_turn", 1) if state_meta else 1
+        
+        if vs_ai_mode:
+            mode_text = "AI 對弈模式"
+            ai_color = "黑" if current_turn == 1 else "白"
+            user_color = "白" if current_turn == 1 else "黑"
+            status_message = f"""📊 目前模式：{mode_text}
+
+您執{user_color}，AI 執{ai_color}。
+
+🤖 AI 對弈模式：
+• 您下完一手後，AI 會自動思考並下下一手
+• 適合與 AI 對戰練習
+
+🆓 一般對弈模式：
+• 一人一手棋，輪流下棋
+• 適合與朋友對戰或自己練習
+
+💡 切換模式：
+• 輸入「對弈 ai」開啟 AI 對弈模式
+• 輸入「對弈 free」切換為一般對弈模式"""
+        else:
+            mode_text = "一般對弈模式"
+            status_message = f"""📊 目前模式：{mode_text}
+
+🆓 一般對弈模式：
+• 一人一手棋，輪流下棋
+• 適合與朋友對戰或自己練習
+
+🤖 AI 對弈模式：
+• 您下完一手後，AI 會自動思考並下下一手
+• 適合與 AI 對戰練習
+
+💡 切換模式：
+• 輸入「對弈 ai」開啟 AI 對弈模式
+• 輸入「對弈 free」切換為一般對弈模式"""
+        
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=status_message)],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    # Handle "對弈 ai" to enable VS AI mode
+    if text.lower() in ["對弈 ai", "對弈ai", "vs ai", "vsai"]:
+        # Enable VS AI mode
+        success = await enable_vs_ai_mode(target_id)
+        if success:
+            # Get current turn to determine AI color
+            state_meta = await load_state_from_gcs(target_id)
+            current_turn = state_meta.get("current_turn", 1) if state_meta else 1
+            user_color = "黑" if current_turn == 1 else "白"
+            ai_color = "白" if current_turn == 1 else "黑"
+            
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"✅ 已開啟 AI 對弈模式！\n\n您執{user_color}，AI 執{ai_color}。\n請開始下棋（例如：D4）。"
+                    )
+                ],
+            )
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="❌ 開啟對弈模式失敗，請稍後再試。")],
+            )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    # Handle "對弈 free" to disable VS AI mode
+    if text.lower() in ["對弈 free", "對弈free", "vs free", "vsfree"]:
+        # Disable VS AI mode
+        success = await disable_vs_ai_mode(target_id)
+        if success:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text="✅ 已關閉 AI 對弈模式！\n\n現在恢復為一般對弈模式（一人一手棋）。"
+                    )
+                ],
+            )
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="❌ 關閉對弈模式失敗，請稍後再試。")],
+            )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
     if "重置" in text or "reset" in text.lower():
         # Get current game ID and SGF file before reset
         current_game_id = None
@@ -1422,7 +1650,7 @@ async def handle_text_message(event: Dict[str, Any]):
         except Exception as error:
             logger.warning(f"Failed to get current SGF before reset: {error}")
 
-        # Reset game state
+        # Reset game state (preserving vs_ai_mode)
         await reset_game_state(target_id, reply_token)
 
         messages = []

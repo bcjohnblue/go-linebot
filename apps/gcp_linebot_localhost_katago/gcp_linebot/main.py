@@ -465,6 +465,251 @@ async def callback_review(request: Request):
         return JSONResponse(content={"error": "Internal Server Error"}, status_code=500)
 
 
+@app.post("/callback/get_ai_next_move")
+async def callback_get_ai_next_move(request: Request):
+    """
+    接收本地 KataGo 服務完成 GTP 分析后的回调通知（AI 下一手）
+
+    流程说明：
+    1. 用户下棋 → Cloud Run 调用本地 KataGo 服务（非同步）
+    2. 本地 KataGo 服务执行 GTP 获取下一手
+    3. 本地 KataGo 服务 POST 回调到此端点
+    4. 此端点更新 SGF 文件，生成图片，发送给用户
+
+    请求体格式：
+    {
+        "status": "success" | "failed",
+        "target_id": "LINE用户ID",
+        "move": "D4",  // GTP 格式的位置（仅 status=success 时）
+        "current_turn": 1,  // 1=黑, 2=白
+        "reply_token": "reply_token",  // LINE reply token
+        "user_board_image_url": "https://...",  // 用户的棋盘图片 URL
+        "error": "错误信息"  // 仅 status=failed 时
+    }
+    """
+    try:
+        body = await request.json()
+        status = body.get("status")
+        target_id = body.get("target_id")
+        move = body.get("move")
+        current_turn = body.get("current_turn")
+        reply_token = body.get("reply_token")  # Get reply_token from callback
+        user_board_image_url = body.get("user_board_image_url")  # Get user's board image URL
+
+        # 验证必需字段
+        if not all([status, target_id]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required fields: status, target_id",
+            )
+
+        logger.info(f"Received VS AI callback: target_id={target_id}, status={status}, move={move}")
+
+        # 处理失败的情况
+        if status == "failed":
+            error = body.get("error", "Unknown error")
+            logger.error(f"VS AI failed for target {target_id}: {error}")
+            # 发送错误消息给用户（如果用户下棋了，也发送用户的棋盘图片）
+            from handlers.line_handler import send_message, is_valid_https_url
+            from linebot.v3.messaging.models import TextMessage, ImageMessage
+
+            messages = []
+            # If we have user's board image, include it first
+            if user_board_image_url and is_valid_https_url(user_board_image_url):
+                messages.append(
+                    ImageMessage(
+                        original_content_url=user_board_image_url,
+                        preview_image_url=user_board_image_url,
+                    )
+                )
+            messages.append(TextMessage(text=f"❌ AI 思考失敗：{error}"))
+            await send_message(target_id, reply_token, messages)
+            return JSONResponse(content={"status": "received"}, status_code=200)
+
+        if not move:
+            logger.warning(f"No move in callback for target {target_id}")
+            from handlers.line_handler import send_message, is_valid_https_url
+            from linebot.v3.messaging.models import TextMessage, ImageMessage
+
+            messages = []
+            # If we have user's board image, include it first
+            if user_board_image_url and is_valid_https_url(user_board_image_url):
+                messages.append(
+                    ImageMessage(
+                        original_content_url=user_board_image_url,
+                        preview_image_url=user_board_image_url,
+                    )
+                )
+            messages.append(TextMessage(text="❌ AI 思考完成但無法取得落子位置"))
+            await send_message(target_id, reply_token, messages)
+            return JSONResponse(content={"status": "received"}, status_code=200)
+
+        # 更新 SGF 文件并回传图片
+        from handlers.line_handler import (
+            get_game_state,
+            save_game_sgf,
+            send_message,
+            is_valid_https_url,
+            get_game_id,
+        )
+        from handlers.go_engine import GoBoard
+        from linebot.v3.messaging.models import TextMessage, ImageMessage
+        from sgfmill import sgf
+        import tempfile
+        import time
+        from services.storage import upload_file, get_public_url
+
+        # Get current game state
+        # Note: This should include the user's last move since it was saved in handle_board_move
+        # Force reload from GCS to ensure we have the latest state including user's move
+        state = await get_game_state(target_id)
+        game = state["game"]
+        sgf_game = state["sgf_game"]
+        
+        # Log board state before placing AI's stone for debugging
+        total_stones = sum(1 for r in range(19) for c in range(19) if game.board[r][c] != 0)
+        logger.info(f"Board state before AI move - total stones: {total_stones}")
+        logger.info(f"Current turn from callback: {current_turn}, from state: {state.get('current_turn')}")
+        
+        # Verify SGF sequence includes user's move
+        sequence = sgf_game.get_main_sequence()
+        sgf_move_count = sum(1 for node in sequence if node.get_move()[1] is not None)
+        logger.info(f"SGF sequence has {sgf_move_count} moves, board has {total_stones} stones")
+        
+        logger.info(f"KataGo returned GTP move: {move}")
+        
+        # Parse coordinates first to check if valid
+        coords = game.parse_coordinates(move)
+        if not coords:
+            error_msg = f"Invalid GTP coordinate format: {move}"
+            logger.error(error_msg)
+            from handlers.line_handler import send_message, is_valid_https_url
+            from linebot.v3.messaging.models import TextMessage, ImageMessage
+            
+            messages = []
+            # If we have user's board image, include it first
+            if user_board_image_url and is_valid_https_url(user_board_image_url):
+                messages.append(
+                    ImageMessage(
+                        original_content_url=user_board_image_url,
+                        preview_image_url=user_board_image_url,
+                    )
+                )
+            messages.append(TextMessage(text=f"❌ AI 落子失敗：座標格式錯誤 ({move})"))
+            await send_message(target_id, reply_token, messages)
+            return JSONResponse(content={"status": "received"}, status_code=200)
+        
+        logger.info(f"Parsed GTP move {move} to coordinates: row={coords[0]}, col={coords[1]}")
+        logger.info(f"Board state at ({coords[0]}, {coords[1]}): {game.board[coords[0]][coords[1]]}")
+        
+        # Place AI's stone (move is in GTP format, parse_coordinates will convert it)
+        success, msg = game.place_stone(move, current_turn)
+        
+        if not success:
+            error_msg = f"Failed to place AI's stone: {msg} (move: {move}, coords: {coords})"
+            logger.error(error_msg)
+            # Log current board state for debugging
+            logger.error(f"Current board state around ({coords[0]}, {coords[1]}):")
+            for r in range(max(0, coords[0]-1), min(19, coords[0]+2)):
+                row_str = f"Row {r}: "
+                for c in range(max(0, coords[1]-1), min(19, coords[1]+2)):
+                    row_str += f"({r},{c})={game.board[r][c]} "
+                logger.error(row_str)
+            
+            messages = []
+            # If we have user's board image, include it first
+            if user_board_image_url and is_valid_https_url(user_board_image_url):
+                messages.append(
+                    ImageMessage(
+                        original_content_url=user_board_image_url,
+                        preview_image_url=user_board_image_url,
+                    )
+                )
+            messages.append(TextMessage(text=f"❌ AI 落子失敗：{msg}"))
+            await send_message(target_id, reply_token, messages)
+            return JSONResponse(content={"status": "received"}, status_code=200)
+
+        # Update SGF record
+        node = sgf_game.get_last_node()
+        new_node = node.new_child()
+
+        color_code = "b" if current_turn == 1 else "w"
+
+        # coords is (row, col), where row 0 is top
+        # sgfmill thinks row 0 is bottom, so flip: (19 - 1 - row)
+        sgf_row = 18 - coords[0]
+        sgf_col = coords[1]
+
+        new_node.set_move(color_code, (sgf_row, sgf_col))
+
+        # Switch turn (AI's turn is done, now it's user's turn)
+        state["current_turn"] = 2 if current_turn == 1 else 1
+
+        # Save SGF file and state metadata
+        sgf_path = await save_game_sgf(target_id, state)
+        if sgf_path:
+            logger.info(f"Saved game SGF after AI move: {sgf_path}")
+
+        # Generate board image
+        game_id = await get_game_id(target_id)
+        timestamp = int(time.time())
+        filename = f"board_ai_{timestamp}.png"
+
+        # Draw board to temporary file
+        from handlers.line_handler import visualizer
+        
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        visualizer.draw_board(game.board, last_move=coords, output_filename=tmp_path)
+
+        # Upload to GCS
+        remote_path = f"target_{target_id}/boards/{game_id}/{filename}"
+        await upload_file(tmp_path, remote_path)
+
+        # Get public URL
+        ai_board_image_url = get_public_url(remote_path)
+
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+        # Send combined message: user's board image + AI's board image + text
+        messages = []
+        
+        # Add user's board image first (if available)
+        if user_board_image_url and is_valid_https_url(user_board_image_url):
+            messages.append(
+                ImageMessage(
+                    original_content_url=user_board_image_url,
+                    preview_image_url=user_board_image_url,
+                )
+            )
+        
+        # Add AI's board image
+        if is_valid_https_url(ai_board_image_url):
+            messages.append(
+                ImageMessage(
+                    original_content_url=ai_board_image_url,
+                    preview_image_url=ai_board_image_url,
+                )
+            )
+        
+        # Add text message
+        color_text = "黑" if color_code == "b" else "白"
+        messages.append(TextMessage(text=f"🤖 AI 下 {color_text}：{move}"))
+        
+        await send_message(target_id, reply_token, messages)
+        
+        return JSONResponse(content={"status": "received"}, status_code=200)
+
+    except Exception as error:
+        logger.error(f"Error in callback_get_ai_next_move: {error}", exc_info=True)
+        return JSONResponse(content={"error": "Internal Server Error"}, status_code=500)
+
+
 if __name__ == "__main__":
     # 1. 優先從環境變數讀取 PORT (Cloud Run 會給 8080)
     # 2. 如果環境變數不存在 (例如在地端)，則回退到 config 的設定，若 config 也沒有則用 8080

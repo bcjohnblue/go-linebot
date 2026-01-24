@@ -9,7 +9,7 @@ import os
 import json
 import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import modal
 
 # Define Modal app
@@ -444,6 +444,220 @@ def upload_model(force: bool = False):
         else:
             # Re-raise other exceptions
             raise
+
+
+@app.function(
+    image=image,
+    gpu="L4",  # KataGo needs GPU
+    timeout=60,  # 1 minute timeout (faster for single move)
+    memory=4096,  # 4GB memory
+    volumes={str(MODEL_DIR): katago_models_volume},  # Mount Volume for models
+    secrets=[
+        modal.Secret.from_name("gcp-go-linebot"),  # GCP service account key
+    ],
+    max_containers=1,
+)
+def get_ai_next_move(
+    sgf_gcs_path: str,
+    callback_url: str,
+    target_id: str,
+    current_turn: int,
+    visits: int = 400,
+    reply_token: Optional[str] = None,
+    user_board_image_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Get AI's next move from KataGo using GTP mode.
+
+    Args:
+        sgf_gcs_path: GCS path to SGF file (gs://bucket/path)
+        callback_url: URL to callback when analysis completes
+        target_id: LINE target ID (user/group/room)
+        current_turn: Current turn (1=black, 2=white)
+        visits: Number of visits for KataGo (default: 400)
+        reply_token: Reply token from user's move (if available)
+        user_board_image_url: User's board image URL (if available)
+
+    Returns:
+        Dict with status and result information
+    """
+    import asyncio
+    import sys
+    from google.cloud import storage
+    from google.oauth2 import service_account
+    import httpx
+    import tempfile
+    from pathlib import Path
+
+    # Initialize logger (simple print-based for Modal)
+    def log(message: str, level: str = "INFO"):
+        print(f"[{level}] {message}")
+
+    try:
+        # Load GCP credentials from Modal secret
+        gcp_key_json = os.environ.get("GCP_SERVICE_ACCOUNT_KEY_JSON")
+        if not gcp_key_json:
+            raise ValueError("GCP_SERVICE_ACCOUNT_KEY_JSON not found in environment")
+
+        credentials_info = json.loads(gcp_key_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_info
+        )
+
+        # Initialize GCS client
+        project_id = os.environ.get("GCP_PROJECT_ID")
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+
+        if not project_id or not bucket_name:
+            raise ValueError(
+                "GCP_PROJECT_ID or GCS_BUCKET_NAME not found in environment"
+            )
+
+        storage_client = storage.Client(credentials=credentials, project=project_id)
+        bucket = storage_client.bucket(bucket_name)
+
+        # Extract GCS path
+        if sgf_gcs_path.startswith("gs://"):
+            gcs_path = sgf_gcs_path[5:]  # Remove gs:// prefix
+        else:
+            gcs_path = sgf_gcs_path
+
+        # Split bucket and path
+        parts = gcs_path.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid GCS path format: {sgf_gcs_path}")
+
+        path_bucket_name, remote_path = parts
+        if path_bucket_name != bucket_name:
+            # Use bucket from path if different
+            gcs_bucket = storage_client.bucket(path_bucket_name)
+        else:
+            gcs_bucket = bucket
+
+        log(f"Starting KataGo GTP for next move: target_id={target_id}, current_turn={current_turn}")
+        log(f"SGF GCS path: {sgf_gcs_path}")
+
+        # Create temporary directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Download SGF file from GCS
+            log(f"Downloading SGF file from GCS: {remote_path}")
+            blob = gcs_bucket.blob(remote_path)
+            sgf_content = blob.download_as_bytes()
+            local_sgf_path = temp_path / "game.sgf"
+            local_sgf_path.write_bytes(sgf_content)
+            log(f"Downloaded SGF file to: {local_sgf_path}")
+
+            # Set up environment
+            os.chdir("/app")
+            if "/app" not in sys.path:
+                sys.path.insert(0, "/app")
+
+            # Set KataGo model path
+            katago_models_volume.reload()
+            model_path = MODEL_DIR / MODEL_FILENAME
+
+            if not model_path.exists():
+                log(f"Model file not found at {model_path}", "ERROR")
+                raise FileNotFoundError(
+                    f"Model file {model_path} not found in Volume. "
+                    f"Please run 'modal run main.py::upload_model' to upload the model first."
+                )
+
+            os.environ["KATAGO_MODEL"] = str(model_path)
+            log(f"Using model from Volume: {model_path}")
+
+            from handlers.katago_handler import run_katago_gtp_next_move
+
+            # Execute KataGo GTP to get next move
+            log(f"Starting KataGo GTP for next move")
+            result = asyncio.run(
+                run_katago_gtp_next_move(
+                    str(local_sgf_path),
+                    current_turn=current_turn,
+                    visits=visits,
+                )
+            )
+
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error")
+                log(f"KataGo GTP failed: {error_msg}", "ERROR")
+
+                # Notify Cloud Run of failure
+                asyncio.run(
+                    _notify_callback(
+                        callback_url,
+                        {
+                            "status": "failed",
+                            "error": error_msg,
+                            "target_id": target_id,
+                            "reply_token": reply_token,  # Pass reply_token even on failure
+                            "user_board_image_url": user_board_image_url,  # Pass user's board image URL
+                        },
+                    )
+                )
+                return {"status": "failed", "error": error_msg}
+
+            # Get the move
+            move = result.get("move")
+            if not move:
+                error_msg = "No move returned from KataGo"
+                log(f"KataGo GTP error: {error_msg}", "ERROR")
+                asyncio.run(
+                    _notify_callback(
+                        callback_url,
+                        {
+                            "status": "failed",
+                            "error": error_msg,
+                            "target_id": target_id,
+                            "reply_token": reply_token,  # Pass reply_token even on failure
+                            "user_board_image_url": user_board_image_url,  # Pass user's board image URL
+                        },
+                    )
+                )
+                return {"status": "failed", "error": error_msg}
+
+            # Prepare callback payload
+            callback_payload = {
+                "status": "success",
+                "target_id": target_id,
+                "move": move,
+                "current_turn": current_turn,
+                "reply_token": reply_token,  # Pass reply_token to callback
+                "user_board_image_url": user_board_image_url,  # Pass user's board image URL
+            }
+
+            # Notify Cloud Run of completion
+            log(f"Notifying Cloud Run of completion: {callback_url}")
+            asyncio.run(_notify_callback(callback_url, callback_payload))
+            log(f"Successfully notified Cloud Run")
+
+            return {"status": "success", "move": move}
+
+    except Exception as error:
+        log(f"Error in get_ai_next_move: {error}", "ERROR")
+        import traceback
+        traceback.print_exc()
+
+        # Try to notify Cloud Run of error
+        try:
+            asyncio.run(
+                _notify_callback(
+                    callback_url,
+                    {
+                        "status": "failed",
+                        "error": str(error),
+                        "target_id": target_id,
+                        "reply_token": reply_token,  # Pass reply_token even on error
+                        "user_board_image_url": user_board_image_url,  # Pass user's board image URL
+                    },
+                )
+            )
+        except Exception as callback_error:
+            log(f"Failed to send error callback: {callback_error}", "ERROR")
+
+        return {"status": "failed", "error": str(error)}
 
 
 # For local testing

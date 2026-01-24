@@ -341,3 +341,207 @@ async def run_katago_analysis(
         error_msg = f"Analysis failed with exit code {return_code}\n{stderr.decode('utf-8', errors='replace')}"
         logger.error(error_msg)
         raise RuntimeError(error_msg)
+
+
+async def run_katago_gtp_next_move(
+    sgf_path: str,
+    current_turn: int,
+    visits: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Execute KataGo GTP mode to get next move.
+    
+    Args:
+        sgf_path: Path to SGF file
+        current_turn: Current turn (1=black, 2=white)
+        visits: Number of visits (optional, uses config default if not provided)
+    
+    Returns:
+        Dict with 'success', 'move' (GTP format like "D4"), and optional 'error'
+    """
+    logger.info(f"Starting KataGo GTP for next move: sgf_path={sgf_path}, current_turn={current_turn}")
+    
+    # Get current file's directory
+    current_file = Path(__file__)
+    project_root = current_file.parent.parent.parent
+    katago_dir = project_root / "katago"
+    config_path = katago_dir / "configs" / "default_gtp.cfg"
+    
+    # Try to find model file
+    model_dir = katago_dir / "models"
+    model_files = list(model_dir.glob("*.bin.gz")) if model_dir.exists() else []
+    
+    if not model_files:
+        error_msg = f"Model file not found in {model_dir}"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+    
+    model_path = model_files[0]  # Use first model file found
+    
+    if not config_path.exists():
+        error_msg = f"Config file not found: {config_path}"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+    
+    # Determine color for genmove command
+    color = "B" if current_turn == 1 else "W"
+    
+    # Build KataGo command
+    katago_cmd = [
+        "katago",
+        "gtp",
+        "-model", str(model_path),
+        "-config", str(config_path),
+    ]
+    
+    if visits:
+        katago_cmd.extend(["-override-config", f"maxVisits={visits}"])
+    
+    logger.info(f"Running KataGo GTP command: {' '.join(katago_cmd)}")
+    
+    try:
+        # Read SGF file content
+        with open(sgf_path, "rb") as f:
+            sgf_content = f.read()
+        
+        # Parse SGF to get moves
+        from sgfmill import sgf
+        sgf_game = sgf.Sgf_game.from_bytes(sgf_content)
+        sequence = sgf_game.get_main_sequence()
+        
+        # Send GTP commands to set up the board
+        gtp_commands = []
+        
+        # Clear board
+        gtp_commands.append("boardsize 19\n")
+        gtp_commands.append("clear_board\n")
+        
+        # Play all moves from SGF
+        for node in sequence:
+            color_move, move = node.get_move()
+            if move is not None:
+                # Convert SGF coordinates to GTP format
+                # SGF: (row, col) where row 0 is bottom (same as GTP)
+                # GTP: "A1" to "T19" (skips 'I'), row 1 is bottom
+                sgf_row, sgf_col = move
+                # Convert column: SGF col 0-18 → GTP A-T (skip I)
+                gtp_col = chr(ord('A') + sgf_col)
+                if gtp_col >= 'I':
+                    gtp_col = chr(ord(gtp_col) + 1)  # Skip 'I'
+                # Convert row: SGF row 0-18 (0=bottom) → GTP row 1-19 (1=bottom)
+                # No conversion needed, just add 1: SGF row 0 → GTP row 1
+                gtp_row = str(sgf_row + 1)
+                gtp_move = f"{gtp_col}{gtp_row}"
+                
+                gtp_color = "B" if color_move == "b" else "W"
+                gtp_commands.append(f"play {gtp_color} {gtp_move}\n")
+        
+        # Get next move
+        gtp_commands.append(f"genmove {color}\n")
+        gtp_commands.append("quit\n")
+        
+        # Send all commands
+        gtp_input = "".join(gtp_commands)
+        logger.debug(f"Sending GTP commands:\n{gtp_input}")
+        
+        # Start KataGo process
+        process = await asyncio.create_subprocess_exec(
+            *katago_cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(project_root),
+        )
+        
+        stdout, stderr = await process.communicate(input=gtp_input.encode('utf-8'))
+        
+        return_code = await process.wait()
+        
+        stdout_text = stdout.decode('utf-8', errors='replace')
+        stderr_text = stderr.decode('utf-8', errors='replace')
+        
+        logger.info(f"KataGo GTP stdout (first 1000 chars):\n{stdout_text[:1000]}")
+        logger.info(f"KataGo GTP stderr (first 1000 chars):\n{stderr_text[:1000]}")
+        
+        if return_code != 0:
+            error_msg = f"KataGo GTP failed with exit code {return_code}\n{stderr_text}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
+        
+        # Parse output to find genmove response
+        # GTP response format: "= <move>\n" or "? <error>\n"
+        # KataGo outputs responses for each command, we need to find the genmove response
+        lines = stdout_text.split('\n')
+        move = None
+        error_response = None
+        
+        # Collect all responses (lines starting with = or ?)
+        responses = []
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            if line_stripped.startswith('='):
+                response_text = line_stripped[1:].strip()
+                responses.append(('=', response_text, i))
+                logger.debug(f"Found response at line {i}: = {response_text}")
+            elif line_stripped.startswith('?'):
+                response_text = line_stripped[1:].strip()
+                responses.append(('?', response_text, i))
+                logger.debug(f"Found error response at line {i}: ? {response_text}")
+        
+        logger.info(f"Found {len(responses)} GTP responses in output")
+        
+        # Find the last genmove command position
+        last_genmove_line = -1
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            if "genmove" in line_stripped.lower() and not line_stripped.startswith('='):
+                last_genmove_line = i
+                logger.debug(f"Found genmove command at line {i}: {line_stripped}")
+        
+        # Find the response after the last genmove command
+        if last_genmove_line >= 0:
+            for resp_type, resp_text, resp_line in responses:
+                if resp_line > last_genmove_line:
+                    if resp_type == '=':
+                        move = resp_text
+                        logger.info(f"Found genmove response at line {resp_line}: '{move}'")
+                        break
+                    elif resp_type == '?':
+                        error_response = resp_text
+                        logger.error(f"Found genmove error response at line {resp_line}: {error_response}")
+                        break
+        
+        # Fallback: if we didn't find a response after genmove, use the last non-empty = response
+        # (genmove should be the last command before quit, so its response should be the last non-empty = response)
+        if not move and not error_response and responses:
+            # Get the last non-empty = response (should be genmove response, quit returns empty)
+            for resp_type, resp_text, resp_line in reversed(responses):
+                if resp_type == '=' and resp_text.strip():  # Only use non-empty responses
+                    move = resp_text
+                    logger.info(f"Using last non-empty = response at line {resp_line} as genmove: '{move}'")
+                    break
+                elif resp_type == '?':
+                    error_response = resp_text
+                    logger.error(f"Last response is error at line {resp_line}: {error_response}")
+                    break
+        
+        if error_response:
+            return {"success": False, "error": error_response}
+        
+        if not move:
+            error_msg = f"Could not find move in KataGo GTP output. Full stdout:\n{stdout_text}\nFull stderr:\n{stderr_text}"
+            logger.error(error_msg)
+            return {"success": False, "error": "Could not find move in KataGo GTP output"}
+        
+        # Handle special moves
+        if move.lower() in ["pass", "resign"]:
+            logger.warning(f"KataGo returned special move: {move}")
+            return {"success": False, "error": f"KataGo returned {move}"}
+        
+        logger.info(f"KataGo GTP returned move: {move}")
+        return {"success": True, "move": move}
+        
+    except Exception as error:
+        error_msg = f"Error running KataGo GTP: {error}"
+        logger.error(error_msg, exc_info=True)
+        return {"success": False, "error": str(error)}
