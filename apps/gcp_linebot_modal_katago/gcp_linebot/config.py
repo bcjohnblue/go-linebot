@@ -26,10 +26,12 @@ config = {
         "app_name": os.getenv("MODAL_APP_NAME", "katago"),
         "function_review": os.getenv("MODAL_FUNCTION_REVIEW", "review"),
         "visits": int(os.getenv("KATAGO_VISITS", "5")),
+        "function_get_ai_next_move": os.getenv("MODAL_FUNCTION_GET_AI_NEXT_MOVE", "get_ai_next_move"),
     },
     # Cloud Run Callback
     "cloud_run": {
         "callback_review_url": os.getenv("CLOUD_RUN_CALLBACK_REVIEW_URL"),
+        "callback_get_ai_next_move_url": os.getenv("CLOUD_RUN_CALLBACK_GET_AI_NEXT_MOVE_URL"),
     },
     # OpenAI
     "openai": {

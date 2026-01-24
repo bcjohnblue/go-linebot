@@ -386,7 +386,13 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 悔棋 / undo - 撤銷上一步
 • 讀取 / load - 從存檔恢復當前遊戲
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
+• 讀取 game_1234567890 10 / load game_1234567890 10 - 讀取指定 game_id 的前 N 手，並創建新對局
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
+
+🤖 AI 對弈功能：
+• 對弈 / vs - 查看目前對弈模式狀態
+• 對弈 ai / vs ai - 開啟 AI 對弈模式（與 AI 對戰）
+• 對弈 free / vs free - 關閉 AI 對弈模式（恢復一般對弈模式）
 
 📊 覆盤分析功能：
 • 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
@@ -448,17 +454,20 @@ async def send_message(
             # Run synchronous call in thread pool
             request = ReplyMessageRequest(reply_token=reply_token, messages=messages)
             await asyncio.to_thread(line_bot_api.reply_message, request)
+            logger.info(f"Sent reply message to {target_id} (message count: {len(messages)})")
             return True  # Successfully used replyMessage
         except ApiException as e:
             # replyToken may have expired, fallback to pushMessage
             if e.status in [400, 410]:
-                print("replyToken expired or invalid, using pushMessage instead")
+                logger.warning(f"replyToken expired or invalid for {target_id}, using pushMessage instead")
             else:
+                logger.error(f"Error sending reply message to {target_id}: {e}", exc_info=True)
                 raise
 
     # Use pushMessage
     request = PushMessageRequest(to=target_id, messages=messages)
     await asyncio.to_thread(line_bot_api.push_message, request)
+    logger.info(f"Sent push message to {target_id} (message count: {len(messages)})")
     return False  # Used pushMessage
 
 
@@ -618,10 +627,60 @@ async def get_game_id(target_id: str) -> str:
 
     # Generate new game ID (timestamp-based)
     new_game_id = f"game_{int(time.time())}"
-    # Save to GCS
-    await save_state_to_gcs(target_id, {"game_id": new_game_id, "current_turn": 1})
+    # Save to GCS, preserving existing state fields like vs_ai_mode
+    if state is None:
+        state = {}
+    state["game_id"] = new_game_id
+    state["current_turn"] = 1
+    await save_state_to_gcs(target_id, state)
     logger.info(f"Created new game ID for {target_id}: {new_game_id}")
     return new_game_id
+
+
+async def enable_vs_ai_mode(target_id: str) -> bool:
+    """Enable VS AI mode for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            state = {}
+        
+        state["vs_ai_mode"] = True
+        success = await save_state_to_gcs(target_id, state)
+        if success:
+            logger.info(f"Enabled VS AI mode for {target_id}")
+        return success
+    except Exception as error:
+        logger.error(f"Failed to enable VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
+
+
+async def disable_vs_ai_mode(target_id: str) -> bool:
+    """Disable VS AI mode for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            state = {}
+        
+        state["vs_ai_mode"] = False
+        success = await save_state_to_gcs(target_id, state)
+        if success:
+            logger.info(f"Disabled VS AI mode for {target_id}")
+        return success
+    except Exception as error:
+        logger.error(f"Failed to disable VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
+
+
+async def is_vs_ai_mode(target_id: str) -> bool:
+    """Check if VS AI mode is enabled for a target"""
+    try:
+        state = await load_state_from_gcs(target_id)
+        if state is None:
+            return False
+        return state.get("vs_ai_mode", False)
+    except Exception as error:
+        logger.error(f"Failed to check VS AI mode for {target_id}: {error}", exc_info=True)
+        return False
 
 
 async def get_game_state(target_id: str) -> Dict[str, Any]:
@@ -681,6 +740,56 @@ async def get_game_state(target_id: str) -> Dict[str, Any]:
     return new_state
 
 
+def create_sgf_with_first_n_moves(sgf_game: sgf.Sgf_game, n_moves: int) -> sgf.Sgf_game:
+    """Create a new SGF game with only the first N moves from the original SGF
+    
+    Args:
+        sgf_game: Original SGF game object
+        n_moves: Number of moves to keep (1-based, so n_moves=10 means first 10 moves)
+    
+    Returns:
+        New SGF game object with only the first N moves
+    """
+    # Create a new SGF game with the same board size
+    new_sgf = sgf.Sgf_game(size=sgf_game.get_size())
+    
+    # Copy root properties (like komi, rules, etc.)
+    root = sgf_game.get_root()
+    new_root = new_sgf.get_root()
+    
+    # Copy common root properties except moves
+    # Common SGF properties: SZ (size), KM (komi), RU (rules), DT (date), 
+    # PB/PW (player names), RE (result), HA (handicap), PL (player to move)
+    common_props = ["SZ", "KM", "RU", "DT", "PB", "PW", "RE", "HA", "PL", "FF", "CA", "GM", "AP"]
+    for prop in common_props:
+        if root.has_property(prop):
+            values = root.get(prop)
+            if values is not None:
+                if isinstance(values, (list, tuple)) and len(values) > 0:
+                    new_root.set(prop, values[0] if len(values) == 1 else values)
+                else:
+                    new_root.set(prop, values)
+    
+    # Get main sequence and take first N moves
+    sequence = sgf_game.get_main_sequence()
+    move_count = 0
+    current_node = new_root
+    
+    for node in sequence:
+        color, move = node.get_move()
+        if move is not None:
+            move_count += 1
+            if move_count > n_moves:
+                break  # Stop after N moves
+            
+            # Create a new child node with this move
+            new_node = current_node.new_child()
+            new_node.set_move(color, move)
+            current_node = new_node
+    
+    return new_sgf
+
+
 def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, Any]]:
     """Restore game state from an SGF game object"""
     try:
@@ -707,6 +816,9 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
         move_count = 0
         sequence = sgf_game.get_main_sequence()
         logger.debug(f"SGF main sequence has {len(sequence)} nodes")
+        
+        # Variables to store last move info
+        last_move_info = None
 
         for node_idx, node in enumerate(sequence):
             color, move = node.get_move()
@@ -747,9 +859,15 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
                     f"but expected turn is {current_turn}. Using SGF color."
                 )
 
-            logger.info(
-                f"Restoring move {move_count}: color={color}, stone_val={stone_val}, pos=({r},{c}), expected_turn={current_turn}"
-            )
+            # Store last move info (will be logged after loop)
+            last_move_info = {
+                "move_count": move_count,
+                "color": color,
+                "stone_val": stone_val,
+                "r": r,
+                "c": c,
+                "expected_turn": current_turn
+            }
 
             # Check if position is already occupied (shouldn't happen in valid SGF, but handle it)
             if game.board[r][c] != 0:
@@ -806,8 +924,13 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
 
             # Switch turn for next move
             current_turn = 2 if stone_val == 1 else 1
-            logger.debug(
-                f"Move {move_count} complete. Next turn: {'black' if current_turn == 1 else 'white'}"
+
+        # Log only the last move
+        if last_move_info:
+            logger.info(
+                f"Restoring move {last_move_info['move_count']}: color={last_move_info['color']}, "
+                f"stone_val={last_move_info['stone_val']}, pos=({last_move_info['r']},{last_move_info['c']}), "
+                f"expected_turn={last_move_info['expected_turn']}"
             )
 
         logger.info(
@@ -905,10 +1028,13 @@ async def save_game_sgf(
             cache_control="no-cache, max-age=0",
         )
 
-        # Save state metadata (game_id, current_turn) to GCS
-        await save_state_to_gcs(
-            target_id, {"game_id": game_id, "current_turn": current_turn}
-        )
+        # Save state metadata to GCS, preserving existing fields like vs_ai_mode
+        existing_state = await load_state_from_gcs(target_id)
+        if existing_state is None:
+            existing_state = {}
+        existing_state["game_id"] = game_id
+        existing_state["current_turn"] = current_turn
+        await save_state_to_gcs(target_id, existing_state)
 
         logger.info(f"Saved/Updated game SGF to {gcs_path}")
         return gcs_path
@@ -927,8 +1053,13 @@ async def reset_game_state(target_id: str, reply_token: Optional[str] = None):
     # Generate new game ID for new game
     new_game_id = f"game_{int(time.time())}"
 
-    # Save new state metadata to GCS
-    await save_state_to_gcs(target_id, {"game_id": new_game_id, "current_turn": 1})
+    # Save new state metadata to GCS, preserving existing fields like vs_ai_mode
+    existing_state = await load_state_from_gcs(target_id)
+    if existing_state is None:
+        existing_state = {}
+    existing_state["game_id"] = new_game_id
+    existing_state["current_turn"] = 1
+    await save_state_to_gcs(target_id, existing_state)
 
     # Save empty SGF to GCS
     new_sgf = sgf.Sgf_game(size=19)
@@ -1023,16 +1154,62 @@ async def handle_board_move(
         except:
             pass
 
+        # Check if VS AI mode is enabled
+        vs_ai_mode = await is_vs_ai_mode(target_id)
+        
         if is_valid_https_url(image_url):
-            # Send board image
+            # If VS AI mode is enabled, don't reply immediately, wait for AI's move
+            if vs_ai_mode:
+                # Call Modal function asynchronously (non-blocking)
+                # Pass reply_token and user's board image URL so callback can send everything together
+                try:
+                    import modal
+                    modal_app_name = config.get("modal", {}).get("app_name")
+                    modal_function_get_ai_next_move = config.get("modal", {}).get("function_get_ai_next_move")
+                    callback_get_ai_next_move_url = config.get("cloud_run", {}).get("callback_get_ai_next_move_url")
+                    
+                    if modal_app_name and modal_function_get_ai_next_move and callback_get_ai_next_move_url:
+                        # Get SGF GCS path (save_game_sgf returns gs:// format)
+                        sgf_gcs_path = sgf_path if sgf_path and sgf_path.startswith("gs://") else None
+                        
+                        if not sgf_gcs_path:
+                            logger.error(f"Invalid SGF path: {sgf_path}")
+                        else:
+                            # Get current turn (after user's move, it's AI's turn)
+                            ai_current_turn = state["current_turn"]
+                        
+                            # Spawn Modal function asynchronously
+                            # Pass reply_token and user_board_image_url to callback
+                            vs_ai_function = modal.Function.from_name(
+                                modal_app_name, modal_function_get_ai_next_move
+                            )
+                            vs_ai_function.spawn(
+                                sgf_gcs_path=sgf_gcs_path,
+                                callback_url=callback_get_ai_next_move_url,
+                                target_id=target_id,
+                                current_turn=ai_current_turn,
+                                reply_token=reply_token,  # Pass reply_token to callback
+                                user_board_image_url=image_url,  # Pass user's board image URL
+                            )
+                            logger.info(f"Spawned Modal function for VS AI: target_id={target_id}, current_turn={ai_current_turn}")
+                            # Don't send reply here, wait for AI callback to respond
+                            return
+                    else:
+                        logger.error("Modal app_name, function_get_ai_next_move, or callback_get_ai_next_move_url not configured")
+                except Exception as modal_error:
+                    logger.error(f"Error calling Modal function for VS AI: {modal_error}", exc_info=True)
+                    # If error, fall through to send user's move image
+            
+            # Send board image (non-VS AI mode, or error in VS AI mode)
+            messages = [
+                ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url,
+                )
+            ]
             request = ReplyMessageRequest(
                 reply_token=reply_token,
-                messages=[
-                    ImageMessage(
-                        original_content_url=image_url,
-                        preview_image_url=image_url,
-                    )
-                ],
+                messages=messages,
             )
             await asyncio.to_thread(line_bot_api.reply_message, request)
         else:
@@ -1052,6 +1229,183 @@ async def handle_board_move(
         request = ReplyMessageRequest(
             reply_token=reply_token,
             messages=[TextMessage(text=f"❌ 處理落子時發生錯誤：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+async def handle_load_game_by_id_with_moves(
+    target_id: str, reply_token: Optional[str], source_game_id: str, move_count: int
+):
+    """Handle load game by game ID with move count (讀取 {gameid} {手數})
+    
+    This function:
+    1. Loads the SGF file for the specified game_id from GCS
+    2. Extracts only the first N moves
+    3. Creates a new game_id
+    4. Saves the truncated SGF file to GCS
+    5. Updates state to the new game_id
+    """
+    try:
+        # Load SGF from GCS using the source game_id
+        from services.storage import download_file, file_exists, upload_buffer, get_public_url
+
+        source_sgf_remote_path = f"target_{target_id}/boards/{source_game_id}/game.sgf"
+        if not await file_exists(source_sgf_remote_path):
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=f"找不到 game_id 為 {source_game_id} 的棋譜。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        # Download source SGF
+        sgf_bytes = await download_file(source_sgf_remote_path)
+        source_sgf_game = sgf.Sgf_game.from_bytes(sgf_bytes)
+        
+        # Get main sequence to count total moves
+        sequence = source_sgf_game.get_main_sequence()
+        total_moves = sum(1 for node in sequence if node.get_move()[1] is not None)
+        
+        if move_count > total_moves:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text=f"該棋譜只有 {total_moves} 手，無法讀取到第 {move_count} 手。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        # Create new SGF with only first N moves
+        truncated_sgf = create_sgf_with_first_n_moves(source_sgf_game, move_count)
+        
+        # Create new game_id for the truncated game
+        new_game_id = f"game_{int(time.time())}"
+        
+        # Save truncated SGF to GCS
+        new_sgf_remote_path = f"target_{target_id}/boards/{new_game_id}/game.sgf"
+        truncated_sgf_bytes = truncated_sgf.serialise()
+        
+        await upload_buffer(
+            truncated_sgf_bytes,
+            new_sgf_remote_path,
+            content_type="application/x-go-sgf",
+            cache_control="no-cache, max-age=0",
+        )
+        
+        logger.info(f"Created truncated SGF with {move_count} moves: {new_sgf_remote_path}")
+        
+        # Restore game state from truncated SGF
+        restored = restore_game_from_sgf_object(truncated_sgf)
+        if not restored:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="讀取失敗：無法解析棋譜檔案。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
+        state = restored
+        game = state["game"]
+        current_turn = state["current_turn"]
+
+        # Always update state.json with restored state from truncated SGF
+        # Preserve vs_ai_mode from existing state if it exists
+        existing_state = await load_state_from_gcs(target_id)
+        vs_ai_mode = existing_state.get("vs_ai_mode", False) if existing_state else False
+        
+        await save_state_to_gcs(
+            target_id,
+            {
+                "game_id": new_game_id,
+                "current_turn": current_turn,
+                "vs_ai_mode": vs_ai_mode,  # Preserve vs_ai_mode state
+            },
+        )
+        logger.info(
+            f"Updated state.json for {target_id} with truncated game: game_id={new_game_id}, current_turn={current_turn}, moves={move_count}"
+        )
+
+        # Find last move coordinates for highlighting and build move_numbers dict
+        last_coords = None
+        move_numbers = {}  # {(row, col): move_number}
+        sequence = truncated_sgf.get_main_sequence()
+        move_num = 0
+        
+        # Traverse sequence to build move_numbers and find last move
+        for node in sequence:
+            color, move = node.get_move()
+            if move is not None:
+                move_num += 1
+                # move is (sgf_row, sgf_col), where sgf_row 0 is bottom
+                sgf_r, sgf_c = move
+                # Convert to engine coordinates (row 0 is top)
+                r = 18 - sgf_r
+                c = sgf_c
+                move_numbers[(r, c)] = move_num
+                last_coords = (r, c)  # Last move will be the final one
+
+        # Draw board
+        import tempfile
+        from services.storage import upload_file
+
+        timestamp = int(time.time())
+        filename = f"board_restored_{timestamp}.png"
+
+        # Draw board to temporary file with move numbers
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        visualizer.draw_board(
+            game.board, last_move=last_coords, output_filename=tmp_path, move_numbers=move_numbers
+        )
+
+        # Upload to GCS
+        remote_path = f"target_{target_id}/boards/{new_game_id}/{filename}"
+        await upload_file(tmp_path, remote_path)
+
+        # Get public URL
+        image_url = get_public_url(remote_path)
+
+        # Clean up temporary file
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+        # Send board image
+        turn_text = "黑" if current_turn == 1 else "白"
+        total_moves_text = f"總手數：{move_count} 手"
+        
+        if is_valid_https_url(image_url):
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"📂 已讀取棋譜 (game_id: {source_game_id}) 前 {move_count} 手！\n新對局 game_id: {new_game_id}\n{total_moves_text}\n目前輪到：{turn_text}"
+                    ),
+                    ImageMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url,
+                    ),
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+        else:
+            logger.warning(f"Invalid image URL: {image_url}")
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"📂 已讀取棋譜 (game_id: {source_game_id}) 前 {move_count} 手！\n新對局 game_id: {new_game_id}\n{total_moves_text}\n目前輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling load game by ID with moves: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"讀取失敗：{str(error)}")],
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
@@ -1101,12 +1455,21 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
             game = state["game"]
             current_turn = state["current_turn"]
 
-            # Find last move coordinates for highlighting
+            # Find last move coordinates for highlighting from SGF sequence
             last_coords = None
-            for r in range(19):
-                for c in range(19):
-                    if game.board[r][c] != 0:
-                        last_coords = (r, c)
+            sgf_game = state["sgf_game"]
+            sequence = sgf_game.get_main_sequence()
+            # Traverse sequence backwards to find the last move
+            for node in reversed(sequence):
+                color, move = node.get_move()
+                if move is not None:
+                    # move is (sgf_row, sgf_col), where sgf_row 0 is bottom
+                    sgf_r, sgf_c = move
+                    # Convert to engine coordinates (row 0 is top)
+                    r = 18 - sgf_r
+                    c = sgf_c
+                    last_coords = (r, c)
+                    break  # Found the last move, exit loop
 
             # Draw board
             import tempfile
@@ -1231,32 +1594,45 @@ async def handle_load_game_by_id(
         # Always update state.json with restored state from SGF when loading any game
         # This ensures state.json reflects the actual state from SGF, not the old cached value
         # If loading a historical game, this will switch the current game to that historical game
+        # Preserve vs_ai_mode from existing state if it exists
+        existing_state = await load_state_from_gcs(target_id)
+        vs_ai_mode = existing_state.get("vs_ai_mode", False) if existing_state else False
+        
         await save_state_to_gcs(
             target_id,
             {
                 "game_id": game_id,
                 "current_turn": current_turn,
+                "vs_ai_mode": vs_ai_mode,  # Preserve vs_ai_mode state
             },
         )
         logger.info(
             f"Updated state.json for {target_id} with restored state from SGF: game_id={game_id}, current_turn={current_turn}"
         )
 
-        # Find last move coordinates for highlighting
-        # Get the last move from SGF sequence instead of traversing the board
+        # Update game state in memory
+        from handlers.line_handler import get_game_state
+        # Note: get_game_state will load from GCS, so state is already updated above
+        
+        # Find last move coordinates for highlighting and build move_numbers dict
+        # Get the last move from SGF sequence and build move_numbers
         last_coords = None
+        move_numbers = {}  # {(row, col): move_number}
         sequence = sgf_game.get_main_sequence()
-        # Traverse sequence backwards to find the last move
-        for node in reversed(sequence):
+        move_num = 0
+        
+        # Traverse sequence to build move_numbers and find last move
+        for node in sequence:
             color, move = node.get_move()
             if move is not None:
+                move_num += 1
                 # move is (sgf_row, sgf_col), where sgf_row 0 is bottom
                 sgf_r, sgf_c = move
                 # Convert to engine coordinates (row 0 is top)
                 r = 18 - sgf_r
                 c = sgf_c
-                last_coords = (r, c)
-                break  # Found the last move, exit loop
+                move_numbers[(r, c)] = move_num
+                last_coords = (r, c)  # Last move will be the final one
 
         # Draw board
         import tempfile
@@ -1265,12 +1641,12 @@ async def handle_load_game_by_id(
         timestamp = int(time.time())
         filename = f"board_restored_{timestamp}.png"
 
-        # Draw board to temporary file
+        # Draw board to temporary file with move numbers
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
             tmp_path = tmp_file.name
 
         visualizer.draw_board(
-            game.board, last_move=last_coords, output_filename=tmp_path
+            game.board, last_move=last_coords, output_filename=tmp_path, move_numbers=move_numbers
         )
 
         # Upload to GCS
@@ -1287,12 +1663,14 @@ async def handle_load_game_by_id(
             pass
 
         turn_text = "黑" if current_turn == 1 else "白"
+        total_moves = len(move_numbers)
+        total_moves_text = f"總手數：{total_moves} 手"
 
         # Format message text based on whether game_id was provided
         if game_id:
-            message_text = f"📂 已讀取棋譜 (game_id: {game_id})！目前輪到：{turn_text}"
+            message_text = f"📂 已讀取棋譜 (game_id: {game_id})！\n{total_moves_text}\n目前輪到：{turn_text}"
         else:
-            message_text = f"📂 已讀取棋譜！目前輪到：{turn_text}"
+            message_text = f"📂 已讀取棋譜！\n{total_moves_text}\n目前輪到：{turn_text}"
 
         if is_valid_https_url(image_url):
             request = ReplyMessageRequest(
@@ -1402,7 +1780,21 @@ async def handle_text_message(event: Dict[str, Any]):
         return
 
     if "讀取" in text or "load" in text.lower():
-        # Match "讀取 game_1234567890" or "讀取game_1234567890" or "load game_1234567890" or "loadgame_1234567890"
+        # Match "讀取 game_1234567890 10" or "讀取 game_1234567890 10" or "load game_1234567890 10"
+        # Pattern: (讀取|load) game_\d+ \d+
+        read_with_moves_match = re.match(r"(?:讀取|load)\s+(game_\d+)\s+(\d+)", text, re.IGNORECASE)
+        if read_with_moves_match:
+            game_id = read_with_moves_match.group(1).strip()
+            move_count_str = read_with_moves_match.group(2).strip()
+            try:
+                move_count = int(move_count_str)
+                if move_count > 0:
+                    await handle_load_game_by_id_with_moves(target_id, reply_token, game_id, move_count)
+                    return
+            except ValueError:
+                pass  # Invalid move count, fall through to regular load
+        
+        # Match "讀取 game_1234567890" or "讀取game_1234567890" or "load game_1234567890"
         # Ensure we match the full game_id format: game_ followed by digits
         read_match = re.match(r"(?:讀取|load)\s*(game_\d+)", text, re.IGNORECASE)
         if read_match:
@@ -1414,6 +1806,103 @@ async def handle_text_message(event: Dict[str, Any]):
 
         # Load current game (no game_id specified)
         await handle_load_game_by_id(target_id, reply_token, None)
+        return
+
+    # Handle "對弈" to show current mode status
+    if text.lower() in ["對弈", "vs"]:
+        # Check current VS AI mode status
+        vs_ai_mode = await is_vs_ai_mode(target_id)
+        state_meta = await load_state_from_gcs(target_id)
+        current_turn = state_meta.get("current_turn", 1) if state_meta else 1
+        
+        if vs_ai_mode:
+            mode_text = "AI 對弈模式"
+            ai_color = "黑" if current_turn == 1 else "白"
+            user_color = "白" if current_turn == 1 else "黑"
+            status_message = f"""📊 目前模式：{mode_text}
+
+您執{user_color}，AI 執{ai_color}。
+
+🤖 AI 對弈模式：
+• 您下完一手後，AI 會自動思考並下下一手
+• 適合與 AI 對戰練習
+
+🆓 一般對弈模式：
+• 一人一手棋，輪流下棋
+• 適合與朋友對戰或自己練習
+
+💡 切換模式：
+• 輸入「對弈 ai」開啟 AI 對弈模式
+• 輸入「對弈 free」切換為一般對弈模式"""
+        else:
+            mode_text = "一般對弈模式"
+            status_message = f"""📊 目前模式：{mode_text}
+
+🆓 一般對弈模式：
+• 一人一手棋，輪流下棋
+• 適合與朋友對戰或自己練習
+
+🤖 AI 對弈模式：
+• 您下完一手後，AI 會自動思考並下下一手
+• 適合與 AI 對戰練習
+
+💡 切換模式：
+• 輸入「對弈 ai」開啟 AI 對弈模式
+• 輸入「對弈 free」切換為一般對弈模式"""
+        
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=status_message)],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    # Handle "對弈 ai" to enable VS AI mode
+    if text.lower() in ["對弈 ai", "對弈ai", "vs ai", "vsai"]:
+        # Enable VS AI mode
+        success = await enable_vs_ai_mode(target_id)
+        if success:
+            # Get current turn to determine AI color
+            state_meta = await load_state_from_gcs(target_id)
+            current_turn = state_meta.get("current_turn", 1) if state_meta else 1
+            user_color = "黑" if current_turn == 1 else "白"
+            ai_color = "白" if current_turn == 1 else "黑"
+            
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"✅ 已開啟 AI 對弈模式！\n\n您執{user_color}，AI 執{ai_color}。\n請開始下棋（例如：D4）。"
+                    )
+                ],
+            )
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="❌ 開啟對弈模式失敗，請稍後再試。")],
+            )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    # Handle "對弈 free" to disable VS AI mode
+    if text.lower() in ["對弈 free", "對弈free", "vs free", "vsfree"]:
+        # Disable VS AI mode
+        success = await disable_vs_ai_mode(target_id)
+        if success:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text="✅ 已關閉 AI 對弈模式！\n\n現在恢復為一般對弈模式（一人一手棋）。"
+                    )
+                ],
+            )
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="❌ 關閉對弈模式失敗，請稍後再試。")],
+            )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
         return
 
     if "重置" in text or "reset" in text.lower():
@@ -1435,7 +1924,7 @@ async def handle_text_message(event: Dict[str, Any]):
         except Exception as error:
             logger.warning(f"Failed to get current SGF before reset: {error}")
 
-        # Reset game state
+        # Reset game state (preserving vs_ai_mode)
         await reset_game_state(target_id, reply_token)
 
         messages = []

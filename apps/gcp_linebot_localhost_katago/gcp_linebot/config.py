@@ -21,13 +21,14 @@ config = {
         "port": int(os.getenv("PORT", "8080")),
         "webhook_path": os.getenv("WEBHOOK_PATH", "/webhook"),
     },
-    # Localhost Review Service
-    "localhost": {
-        "review_url": os.getenv("LOCALHOST_REVIEW_URL"),
+    # Localhost KataGo Service
+    "localhost_katago": {
+        "url": os.getenv("LOCALHOST_KATAGO_URL"),
     },
     # Cloud Run Callback
     "cloud_run": {
         "callback_review_url": os.getenv("CLOUD_RUN_CALLBACK_REVIEW_URL"),
+        "callback_get_ai_next_move_url": os.getenv("CLOUD_RUN_CALLBACK_GET_AI_NEXT_MOVE_URL"),
     },
     # OpenAI
     "openai": {

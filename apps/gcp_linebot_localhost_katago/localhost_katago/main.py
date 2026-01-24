@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from config import config
 from logger import logger
-from handlers.katago_handler import run_katago_analysis
+from handlers.katago_handler import run_katago_analysis, run_katago_gtp_next_move
 import httpx
 import tempfile
 
@@ -193,6 +193,188 @@ async def review_from_cloud_run(request: Request, background_tasks: BackgroundTa
         raise HTTPException(
             status_code=500, detail=f"Failed to process review request: {str(error)}"
         )
+
+
+@app.post("/get_ai_next_move")
+async def get_ai_next_move(request: Request, background_tasks: BackgroundTasks):
+    """Receive request from Cloud Run to get AI's next move and execute KataGo GTP asynchronously"""
+    try:
+        body = await request.json()
+        sgf_gcs_path = body.get("sgf_gcs_path")
+        callback_url = body.get("callback_url")
+        target_id = body.get("target_id")
+        current_turn = body.get("current_turn")
+        reply_token = body.get("reply_token")
+        user_board_image_url = body.get("user_board_image_url")
+        visits = body.get("visits", 400)  # Default visits for AI vs player
+
+        if not all([sgf_gcs_path, callback_url, target_id, current_turn is not None]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required fields: sgf_gcs_path, callback_url, target_id, current_turn",
+            )
+
+        logger.info(
+            f"Received get_ai_next_move request: target_id={target_id}, current_turn={current_turn}"
+        )
+
+        # Add task to background tasks
+        background_tasks.add_task(
+            execute_get_ai_next_move_task,
+            sgf_gcs_path=sgf_gcs_path,
+            callback_url=callback_url,
+            target_id=target_id,
+            current_turn=current_turn,
+            reply_token=reply_token,
+            user_board_image_url=user_board_image_url,
+            visits=visits,
+        )
+
+        # Immediately return response (202 Accepted)
+        return JSONResponse(
+            content={
+                "status": "accepted",
+                "message": "AI next move task started",
+            },
+            status_code=202,
+        )
+
+    except Exception as error:
+        logger.error(f"Error in get_ai_next_move endpoint: {error}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to process get_ai_next_move request: {str(error)}"
+        )
+
+
+async def execute_get_ai_next_move_task(
+    sgf_gcs_path: str,
+    callback_url: str,
+    target_id: str,
+    current_turn: int,
+    reply_token: Optional[str],
+    user_board_image_url: Optional[str],
+    visits: int,
+):
+    """Execute KataGo GTP next move task in background"""
+    try:
+        # Extract GCS path (gs://bucket/path or bucket/path)
+        if sgf_gcs_path.startswith("gs://"):
+            gcs_path = sgf_gcs_path[5:]  # Remove gs:// prefix
+        else:
+            gcs_path = sgf_gcs_path
+
+        # Split bucket and path
+        parts = gcs_path.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid GCS path format: {sgf_gcs_path}")
+
+        bucket_name, remote_path = parts
+
+        # Verify bucket matches configured bucket
+        from services.storage import storage_client
+
+        configured_bucket = storage_client.bucket(config["storage"]["bucket_name"])
+        if bucket_name != config["storage"]["bucket_name"]:
+            # Use the bucket from the path if different
+            bucket = storage_client.bucket(bucket_name)
+        else:
+            bucket = configured_bucket
+
+        # Create temporary directory for GTP task
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Download SGF file from GCS
+            logger.info(f"Downloading SGF file from GCS: {remote_path}")
+            blob = bucket.blob(remote_path)
+            sgf_content = blob.download_as_bytes()
+            local_sgf_path = temp_path / "game.sgf"
+            local_sgf_path.write_bytes(sgf_content)
+            logger.info(f"Downloaded SGF file to: {local_sgf_path}")
+
+            # Execute KataGo GTP next move
+            logger.info(f"Starting KataGo GTP for next move: target_id={target_id}, current_turn={current_turn}")
+            result = await run_katago_gtp_next_move(str(local_sgf_path), current_turn, visits=visits)
+
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error")
+                logger.error(f"KataGo GTP failed for target {target_id}: {error_msg}")
+
+                # Notify Cloud Run of failure
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        callback_url,
+                        json={
+                            "status": "failed",
+                            "target_id": target_id,
+                            "error": error_msg,
+                            "reply_token": reply_token,
+                            "user_board_image_url": user_board_image_url,
+                        },
+                        timeout=30.0,
+                    )
+                return
+
+            # Get move from result
+            move = result.get("move")
+            if not move:
+                error_msg = "KataGo returned success but no move"
+                logger.error(error_msg)
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        callback_url,
+                        json={
+                            "status": "failed",
+                            "target_id": target_id,
+                            "error": error_msg,
+                            "reply_token": reply_token,
+                            "user_board_image_url": user_board_image_url,
+                        },
+                        timeout=30.0,
+                    )
+                return
+
+            # Prepare callback payload
+            callback_payload = {
+                "status": "success",
+                "target_id": target_id,
+                "move": move,
+                "current_turn": current_turn,
+                "reply_token": reply_token,
+                "user_board_image_url": user_board_image_url,
+            }
+
+            # Notify Cloud Run of completion
+            logger.info(f"Notifying Cloud Run of completion: {callback_url}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    callback_url,
+                    json=callback_payload,
+                    timeout=60.0,
+                )
+                response.raise_for_status()
+                logger.info(f"Successfully notified Cloud Run: {response.status_code}")
+
+    except Exception as error:
+        logger.error(f"Error in get_ai_next_move task: {error}", exc_info=True)
+        # Try to notify Cloud Run of error
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    callback_url,
+                    json={
+                        "status": "failed",
+                        "error": str(error),
+                        "target_id": target_id,
+                        "reply_token": reply_token,
+                        "user_board_image_url": user_board_image_url,
+                    },
+                    timeout=60.0,
+                )
+        except Exception as callback_error:
+            logger.error(
+                f"Failed to send error callback: {callback_error}", exc_info=True
+            )
 
 
 @app.get("/health")

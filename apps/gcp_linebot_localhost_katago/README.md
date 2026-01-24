@@ -31,6 +31,22 @@
 4. 生成當前棋盤圖片並回傳至 LINE
 ```
 
+**AI 對弈功能：**
+
+```
+1. 用戶輸入「對弈 ai」開啟 AI 對弈模式
+2. 用戶在 LINE 中輸入座標（如 D4, Q16）
+3. Cloud Run 服務接收請求並驗證落子合法性
+4. 更新棋盤狀態並保存為 SGF 格式至 GCS
+5. 生成用戶的棋盤圖片（暫不回傳）
+6. Cloud Run 發起 HTTP 請求至本地 KataGo 服務
+7. 本地服務從 GCS 下載 SGF 檔案
+8. 本地服務執行 KataGo GTP 獲取 AI 下一步棋
+9. 本地服務回調 Cloud Run
+10. Cloud Run 更新 SGF 檔案並生成 AI 的棋盤圖片
+11. 合併回傳：用戶的棋盤圖片 + AI 的棋盤圖片 + 文字訊息
+```
+
 **覆盤分析功能：**
 
 ```
@@ -89,18 +105,25 @@ gcloud config get-value project
 
 2. **GCS_BUCKET_NAME** - GCS Bucket 名稱
 
-3. **LOCALHOST_REVIEW_URL** - 本地 KataGo 服務的公開 URL
+3. **LOCALHOST_KATAGO_URL** - 本地 KataGo 服務的公開 URL（用於 AI 對弈和覆盤功能）
 
    ```bash
    # 如果使用 cloudflare tunnel 或 ngrok
-   export LOCALHOST_REVIEW_URL=https://your-tunnel-url.com/review
+   export LOCALHOST_KATAGO_URL=https://your-tunnel-url.com
    ```
 
-4. **CLOUD_RUN_CALLBACK_REVIEW_URL** - Cloud Run 服務的回調 URL
+4. **CLOUD_RUN_CALLBACK_REVIEW_URL** - Cloud Run 服務的覆盤回調 URL
    ```bash
    # 部署後會自動取得，格式為：
    # https://SERVICE_NAME-PROJECT_NUMBER.REGION.run.app/callback/review
    export CLOUD_RUN_CALLBACK_REVIEW_URL=https://your-service-url.run.app/callback/review
+   ```
+
+5. **CLOUD_RUN_CALLBACK_GET_AI_NEXT_MOVE_URL** - Cloud Run 服務的 AI 對弈回調 URL
+   ```bash
+   # 部署後會自動取得，格式為：
+   # https://SERVICE_NAME-PROJECT_NUMBER.REGION.run.app/callback/get_ai_next_move
+   export CLOUD_RUN_CALLBACK_GET_AI_NEXT_MOVE_URL=https://your-service-url.run.app/callback/get_ai_next_move
    ```
 
 **設定 Secrets Manager（用於敏感資訊）：**
@@ -153,6 +176,55 @@ GCS_BUCKET_NAME=your_gcp_bucket_name
 # Server Configuration
 PORT=3000
 ```
+
+## 功能說明
+
+### AI 對弈功能
+
+AI 對弈功能允許用戶與 KataGo AI 進行對戰。啟用後，用戶下完一手棋，AI 會自動思考並下下一手。
+
+**使用方式：**
+
+1. 輸入「對弈 ai」或「vs ai」開啟 AI 對弈模式
+2. 開始下棋（例如：D4）
+3. AI 會自動回應並下下一步棋
+4. 輸入「對弈 free」或「vs free」關閉 AI 對弈模式，恢復一般對弈模式
+5. 輸入「對弈」或「vs」查看當前模式狀態
+
+**技術規格：**
+
+- AI 引擎：KataGo GTP（visits=400）
+- 思考時間：約 10 秒內
+- 配置檔案：`localhost_katago/katago/configs/default_gtp.cfg`
+
+**注意事項：**
+
+- AI 對弈模式啟用後，用戶下完棋後不會立即收到回覆，需等待 AI 思考完成
+- 系統會合併回傳用戶的棋盤圖片和 AI 的棋盤圖片，以及 AI 的落子位置
+
+### 覆盤分析功能
+
+覆盤分析功能使用 KataGo 對整局棋進行深度分析，找出關鍵手數並生成評論。
+
+**使用方式：**
+
+1. 上傳 SGF 棋譜檔案
+2. 輸入「覆盤」開始分析
+3. 等待約 10 分鐘獲得分析結果
+
+**分析結果包含：**
+
+- 🗺️ 全盤手順圖 - 顯示整局棋的所有手順
+- 📈 勝率變化圖 - 顯示黑方勝率隨手數的變化曲線
+- 🎬 關鍵手數 GIF 動畫 - 勝率差距最大的前 20 手動態演示
+- 💬 ChatGPT 評論 - 針對關鍵手數的評論
+
+**技術規格：**
+
+- 分析引擎：KataGo AI（visits=1000）
+- 分析時間：KataGo 全盤分析約 6 分鐘
+- 評論生成：ChatGPT 評論生成約 3 分鐘
+- 動畫繪製：GIF 動畫繪製約 10 秒
 
 ## 執行方式
 

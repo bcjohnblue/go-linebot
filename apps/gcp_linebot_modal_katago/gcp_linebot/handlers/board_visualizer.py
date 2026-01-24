@@ -1,4 +1,4 @@
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import os
 from pathlib import Path
 
@@ -72,12 +72,13 @@ class BoardVisualizer:
         return paste_x, paste_y
 
     def draw_board(
-        self, board_state, last_move=None, output_filename="current_board.png"
+        self, board_state, last_move=None, output_filename="current_board.png", move_numbers=None
     ):
         """
         :param board_state: 19x19 二維陣列
         :param last_move: Tuple (row, col) 代表最後一手的位置，若無則傳入 None
         :param output_filename: 檔名
+        :param move_numbers: Dict {(row, col): move_number} 標註每手棋的手順
         """
         canvas = self.base_img.copy()
         size = 19
@@ -113,6 +114,48 @@ class BoardVisualizer:
 
                     # 貼上標記 (這會覆蓋原本畫在該位置的普通棋子)
                     canvas.paste(marker_img, (px, py), marker_img)
+
+        # 3. ### 新增：標註手順 (Move Numbers)
+        if move_numbers:
+            draw = ImageDraw.Draw(canvas)
+            # 嘗試載入字體，如果失敗則使用預設字體
+            try:
+                # 嘗試使用系統字體
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 16)
+            except:
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+                except:
+                    # 使用預設字體
+                    font = ImageFont.load_default()
+            
+            for (r, c), move_num in move_numbers.items():
+                if 0 <= r < size and 0 <= c < size and board_state[r][c] != 0:
+                    # 取得棋子中心座標
+                    center_x = self.MARGIN_X + (c * self.GRID_SIZE)
+                    center_y = self.MARGIN_Y + (r * self.GRID_SIZE)
+                    
+                    # 根據棋子顏色選擇文字顏色
+                    stone_color = board_state[r][c]
+                    text_color = "white" if stone_color == 1 else "black"
+                    
+                    # 計算文字位置（居中）
+                    text = str(move_num)
+                    bbox = draw.textbbox((0, 0), text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    text_x = center_x - text_width // 2
+                    text_y = center_y - text_height // 2
+                    
+                    # 繪製文字（帶有輕微的描邊以提高可讀性）
+                    # 先畫描邊（黑色或白色）
+                    outline_color = "black" if text_color == "white" else "white"
+                    for adj_x in [-1, 0, 1]:
+                        for adj_y in [-1, 0, 1]:
+                            if adj_x != 0 or adj_y != 0:
+                                draw.text((text_x + adj_x, text_y + adj_y), text, font=font, fill=outline_color)
+                    # 再畫主文字
+                    draw.text((text_x, text_y), text, font=font, fill=text_color)
 
         # 儲存
         canvas.save(output_filename, format="PNG")
