@@ -166,6 +166,10 @@
   - GCP Cloud Storage (GCS) - 檔案儲存
   - Modal (GPU 計算平台)
 
+## 開發心得
+
+[go-linebot 開發心得](https://www.blog.bcjohn.com/2026/01/28/go-linebot-%E9%96%8B%E7%99%BC%E5%BF%83%E5%BE%97/) 分享了整個開發的過程
+
 ## License
 
 MIT
