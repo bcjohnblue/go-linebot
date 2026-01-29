@@ -31,6 +31,14 @@
 4. 生成當前棋盤圖片並回傳至 LINE
 ```
 
+**形勢判斷功能：**
+```
+1. 用戶在進行中的對局裡輸入「形勢」或「形式」或「evaluation」
+2. Cloud Run 取得當前對局的 SGF（GCS）並呼叫本地 KataGo /evaluation 端點
+3. 本地服務執行 KataGo evaluation 分析（ownership / scoreLead）
+4. Cloud Run 繪製領地分布圖並上傳圖片至 GCS，回傳目數差距與圖片至 LINE
+```
+
 **AI 對弈功能：**
 
 ```
@@ -191,6 +199,20 @@ PORT=3000
 
 ## 功能說明
 
+### 形勢判斷功能
+
+形勢判斷功能對當前盤面進行 KataGo 評估，顯示領地分布與目數差距。
+
+**使用方式：**
+
+1. 在進行中的對局裡輸入「形勢」或「形式」或「evaluation」
+2. Bot 會回傳領地分布圖與目數文字（例如：目前形勢：黑 +3.5 目。）
+
+**技術規格：**
+
+- 分析引擎：KataGo evaluation（單一盤面）
+- score_lead 為黑棋領先的目數
+
 ### AI 對弈功能
 
 AI 對弈功能允許用戶與 KataGo AI 進行對戰。啟用後，用戶下完一手棋，AI 會自動思考並下下一手。
@@ -294,8 +316,9 @@ gcp_linebot_localhost_katago/
     │   └── storage.py              # GCS 儲存服務
     ├── katago/                     # KataGo 相關檔案
     │   ├── models/                 # KataGo 模型
-    │   ├── configs/                # 設定檔
-    │   └── analysis.py
+│   ├── configs/                # 設定檔
+│   ├── review.py               # 覆盤分析
+│   └── evaluation.py           # 形勢判斷
     ├── env.example
     └── requirements.txt
 ```

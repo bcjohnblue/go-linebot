@@ -1,6 +1,6 @@
 #!/bin/bash
-# KataGo 分析腳本
-# 使用方式: ./analysis.sh <sgf_file>
+# KataGo 覆盤分析腳本（全盤 review）
+# 使用方式: ./review.sh <sgf_file>
 # 使用 katawrap.py 來讀取 SGF 文件並傳遞給 KataGo，輸出 JSONL 格式
 
 set -e
@@ -64,7 +64,7 @@ else
 fi
 
 # 執行分析
-echo "Starting KataGo analysis..."
+echo "Starting KataGo review analysis..."
 echo "Config: $KATAGO_CONFIG"
 echo "Model:  $KATAGO_MODEL"
 echo "SGF File: $SGF_FILE_ABS"
@@ -113,16 +113,16 @@ echo "{\"sgfFile\": \"$SGF_FILE_ABS\"}" | \
 
 if [ $? -eq 0 ]; then
   echo ""
-  echo "Analysis completed. Output saved to: $OUTPUT_JSONL"
+  echo "Review analysis completed. Output saved to: $OUTPUT_JSONL"
 fi
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
   echo ""
-  echo "Analysis completed successfully! JSONL output generated."
+  echo "Review analysis completed successfully! JSONL output generated."
 else
   echo ""
-  echo "Error: KataGo analysis failed"
+  echo "Error: KataGo review analysis failed"
   exit 1
 fi

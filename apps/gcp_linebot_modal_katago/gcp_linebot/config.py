@@ -25,6 +25,7 @@ config = {
     "modal": {
         "app_name": os.getenv("MODAL_APP_NAME", "katago"),
         "function_review": os.getenv("MODAL_FUNCTION_REVIEW", "review"),
+        "function_evaluation": os.getenv("MODAL_FUNCTION_EVALUATION", "evaluation"),
         "function_get_ai_next_move": os.getenv("MODAL_FUNCTION_GET_AI_NEXT_MOVE", "get_ai_next_move"),
         "visits": int(os.getenv("KATAGO_VISITS", "1000")),
     },

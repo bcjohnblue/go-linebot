@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from config import config
 from logger import logger
-from handlers.katago_handler import run_katago_analysis, run_katago_gtp_next_move
+from handlers.katago_handler import run_katago_analysis, run_katago_gtp_next_move, run_katago_analysis_evaluation
 import httpx
 import tempfile
 
@@ -192,6 +192,67 @@ async def review_from_cloud_run(request: Request, background_tasks: BackgroundTa
         logger.error(f"Error in review endpoint: {error}", exc_info=True)
         raise HTTPException(
             status_code=500, detail=f"Failed to process review request: {str(error)}"
+        )
+
+
+@app.post("/evaluation")
+async def evaluation_from_cloud_run(request: Request):
+    """Receive evaluation request from Cloud Run and execute KataGo evaluation synchronously"""
+    try:
+        body = await request.json()
+        sgf_gcs_path = body.get("sgf_gcs_path")
+        current_turn = body.get("current_turn", 1)
+        visits = body.get("visits", 1000)
+
+        if not sgf_gcs_path:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required field: sgf_gcs_path",
+            )
+
+        logger.info(f"Received evaluation request: sgf_gcs_path={sgf_gcs_path}")
+
+        # Download SGF from GCS to temporary file
+        from services.storage import download_file, storage_client, bucket
+
+        # Extract GCS path (gs://bucket/path or bucket/path)
+        if sgf_gcs_path.startswith("gs://"):
+            parts = sgf_gcs_path[5:].split("/", 1)
+            bucket_name = parts[0]
+            remote_path = parts[1] if len(parts) > 1 else ""
+        else:
+            bucket_name = config.get("gcs", {}).get("bucket_name")
+            remote_path = sgf_gcs_path
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            local_sgf_path = temp_path / "evaluation.sgf"
+
+            logger.info(f"Downloading SGF file from GCS: {remote_path}")
+            blob = bucket.blob(remote_path)
+            sgf_content = blob.download_as_bytes()
+            local_sgf_path.write_bytes(sgf_content)
+            logger.info(f"Downloaded SGF file to: {local_sgf_path}")
+
+            # Execute KataGo evaluation
+            logger.info(f"Starting KataGo evaluation")
+            result = await run_katago_analysis_evaluation(
+                str(local_sgf_path), current_turn, visits=visits
+            )
+
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error")
+                logger.error(f"KataGo evaluation failed: {error_msg}")
+                raise HTTPException(
+                    status_code=500, detail=f"KataGo evaluation failed: {error_msg}"
+                )
+
+            return JSONResponse(content=result, status_code=200)
+
+    except Exception as error:
+        logger.error(f"Error in evaluation endpoint: {error}", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to process evaluation request: {str(error)}"
         )
 
 

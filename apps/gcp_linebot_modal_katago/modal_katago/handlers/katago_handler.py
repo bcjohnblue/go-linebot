@@ -177,7 +177,7 @@ async def run_katago_analysis(
     current_file = Path(__file__)
     project_root = current_file.parent.parent
     katago_dir = project_root / "katago"
-    analysis_script = katago_dir / "analysis.py"
+    review_script = katago_dir / "review.py"
 
     # Resolve SGF file path
     def resolve_sgf_path(path: str) -> str:
@@ -205,9 +205,9 @@ async def run_katago_analysis(
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
-    # Check if analysis.py exists
-    if not analysis_script.exists():
-        error_msg = f"Analysis script not found: {analysis_script}"
+    # Check if review.py exists
+    if not review_script.exists():
+        error_msg = f"Review script not found: {review_script}"
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
 
@@ -215,7 +215,7 @@ async def run_katago_analysis(
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d%H%M")
 
-    # Build output filename (consistent with analysis.sh format)
+    # Build output filename (consistent with review.sh format)
     sgf_basename = os.path.basename(resolved_sgf_path).replace(".sgf", "")
     results_dir = katago_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -225,7 +225,7 @@ async def run_katago_analysis(
     logger.info(f"Output JSONL file: {output_jsonl}")
 
     # Build arguments
-    args = [str(analysis_script), resolved_sgf_path]
+    args = [str(review_script), resolved_sgf_path]
     if visits:
         args.append(str(visits))
     logger.info(f"Running command: python3 {' '.join(args)}")
@@ -339,6 +339,181 @@ async def run_katago_analysis(
         error_msg = f"Analysis failed with exit code {return_code}\n{stderr.decode('utf-8', errors='replace')}"
         logger.error(error_msg)
         raise RuntimeError(error_msg)
+
+
+async def run_katago_analysis_evaluation(
+    sgf_path: str,
+    current_turn: int,
+    visits: Optional[int] = 1000,
+) -> Dict[str, Any]:
+    """
+    使用 evaluation pipeline 對 sgf_path 做 KataGo 分析，
+    取得當前盤面的 scoreLead + ownership，並轉成畫圖與文字需要的格式。
+    """
+    # Get current file's directory
+    current_file = Path(__file__)
+    project_root = current_file.parent.parent
+    katago_dir = project_root / "katago"
+    evaluation_script = katago_dir / "evaluation.py"
+
+    # Resolve SGF path (reuse logic from run_katago_analysis)
+    def resolve_sgf_path(path: str) -> str:
+        if os.path.isabs(path):
+            return path
+        possible_paths = [
+            os.path.join(os.getcwd(), path),
+            str(project_root / path),
+            str(katago_dir / path),
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                return p
+        return str(project_root / path)
+
+    resolved_sgf_path = resolve_sgf_path(sgf_path)
+    logger.info(f"[evaluation] Resolved SGF path: {resolved_sgf_path}")
+
+    if not os.path.exists(resolved_sgf_path):
+        error_msg = f"SGF file not found for evaluation: {sgf_path}\nResolved to: {resolved_sgf_path}"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+
+    if not evaluation_script.exists():
+        error_msg = f"Evaluation script not found: {evaluation_script}"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+
+    # 準備輸出 JSONL 路徑（evaluation 專用）
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d%H%M")
+    results_dir = katago_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    sgf_basename = os.path.basename(resolved_sgf_path).replace(".sgf", "")
+    output_jsonl = results_dir / f"{sgf_basename}_evaluation_{timestamp}_{visits or 'default'}.jsonl"
+    logger.info(f"[evaluation] Output JSONL file: {output_jsonl}")
+
+    env = os.environ.copy()
+    env["OUTPUT_JSONL"] = str(output_jsonl)
+    if visits:
+        env["VISITS"] = str(visits)
+
+    # 執行 evaluation.py
+    try:
+        logger.info(f"[evaluation] Starting KataGo evaluation subprocess...")
+        process = await asyncio.create_subprocess_exec(
+            "python3",
+            str(evaluation_script),
+            resolved_sgf_path,
+            *( [str(visits)] if visits else [] ),
+            cwd=str(project_root),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout, stderr = await process.communicate()
+        return_code = await process.wait()
+        logger.info(f"[evaluation] process completed with return code: {return_code}")
+
+        if return_code != 0:
+            error_msg = f"KataGo evaluation script failed with exit code {return_code}\n{stderr.decode('utf-8', errors='replace')}"
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg}
+    except Exception as error:
+        error_msg = f"Error running evaluation script: {error}"
+        logger.error(error_msg, exc_info=True)
+        return {"success": False, "error": error_msg}
+
+    jsonl_path = output_jsonl
+    if not jsonl_path or not os.path.exists(jsonl_path):
+        error_msg = f"KataGo evaluation JSONL file not found: {jsonl_path}"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+
+    # 讀取最後一行非空 JSON（只分析最後一手時應該只有一行）
+    last_obj: Optional[Dict[str, Any]] = None
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last_obj = json.loads(line)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Skip invalid JSONL line in evaluation: {e}")
+                    continue
+    except Exception as error:
+        error_msg = f"Failed to read JSONL for evaluation: {error}"
+        logger.error(error_msg, exc_info=True)
+        return {"success": False, "error": error_msg}
+
+    if not last_obj:
+        error_msg = "No valid analysis result found in JSONL for evaluation"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+
+    root_info = last_obj.get("rootInfo", {}) or {}
+    score_lead = root_info.get("scoreLead")
+    winrate = root_info.get("winrate")
+    current_player = root_info.get("currentPlayer", "B")
+
+    # ownership 可能出現在 rootInfo 或頂層
+    ownership_list = root_info.get("ownership")
+    if not isinstance(ownership_list, list):
+        ownership_list = last_obj.get("ownership")
+
+    if not isinstance(ownership_list, list):
+        error_msg = "Ownership array not found in KataGo analysis result"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+
+    board_x = last_obj.get("boardXSize", 19)
+    board_y = last_obj.get("boardYSize", 19)
+    expected_len = board_x * board_y
+    if len(ownership_list) != expected_len:
+        logger.warning(
+            f"Ownership array length mismatch: expected {expected_len}, got {len(ownership_list)}"
+        )
+
+    # 還原成 19x19 矩陣（row-major，自上而下、由左至右）
+    ownership_grid = []
+    idx = 0
+    for _ in range(board_y):
+        row_vals = []
+        for _ in range(board_x):
+            if idx < len(ownership_list):
+                try:
+                    v = float(ownership_list[idx])
+                except (TypeError, ValueError):
+                    v = 0.0
+            else:
+                v = 0.0
+            row_vals.append(v)
+            idx += 1
+        ownership_grid.append(row_vals)
+
+    # 依 threshold=0.5 建立領地矩陣：0=中立,1=黑地,2=白地
+    # ownership 是從 KataGo 的 currentPlayer 視角
+    threshold = 0.5
+    territory_grid = [[0 for _ in range(board_x)] for _ in range(board_y)]
+
+    for r in range(board_y):
+        for c in range(board_x):
+            v = ownership_grid[r][c]
+            if v > threshold:
+                territory_grid[r][c] = 1  # 黑地
+            elif v < -threshold:
+                territory_grid[r][c] = 2  # 白地
+
+    return {
+        "success": True,
+        "territory": territory_grid,
+        "ownership_raw": ownership_grid,
+        "currentPlayer": current_player,
+        "scoreLead": score_lead,
+        "winrate": winrate,
+    }
 
 
 async def run_katago_gtp_next_move(
