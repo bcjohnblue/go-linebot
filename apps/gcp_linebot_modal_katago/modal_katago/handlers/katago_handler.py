@@ -519,7 +519,7 @@ async def run_katago_analysis_evaluation(
 async def run_katago_gtp_next_move(
     sgf_path: str,
     current_turn: int,
-    visits: Optional[int] = None,
+    visits: Optional[int] = 1000,
 ) -> Dict[str, Any]:
     """
     Execute KataGo GTP mode to get next move.
