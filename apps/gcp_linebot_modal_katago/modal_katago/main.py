@@ -581,7 +581,7 @@ def get_ai_next_move(
     callback_url: str,
     target_id: str,
     current_turn: int,
-    visits: int = 400,
+    visits: int = 1000,
     reply_token: Optional[str] = None,
     user_board_image_url: Optional[str] = None,
 ) -> Dict[str, Any]:

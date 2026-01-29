@@ -656,13 +656,13 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
             # Spawn the function asynchronously (non-blocking)
             # This will trigger the Modal function to run in the background
-            visits = config.get("modal", {}).get("visits", 1000)
+            # visits = config.get("modal", {}).get("visits", 1000)
             review_function.spawn(
                 task_id=task_id,
                 sgf_gcs_path=sgf_gcs_path,
                 callback_url=callback_review_url,
                 target_id=target_id,
-                visits=visits,
+                # visits=visits,
             )
             logger.info(f"Successfully spawned Modal function for task: {task_id}")
 
