@@ -237,7 +237,7 @@ def review(
             if "/app" not in sys.path:
                 sys.path.insert(0, "/app")
 
-            # Set environment variable for analysis.sh to use the same Python as main function
+            # Set environment variable for review.sh to use the same Python as main function
             # Use the same Python executable that's running this function
             # This ensures chardet and other packages are available
             os.environ["VENV_PY"] = sys.executable
@@ -266,7 +266,7 @@ def review(
                     f"Please run 'modal run main.py::upload_model' to upload the model first. "
                     f"Expected path: {model_path}"
                 )
-            # Set environment variable for analysis.sh to use Volume-mounted model
+            # Set environment variable for review.sh to use Volume-mounted model
             os.environ["KATAGO_MODEL"] = str(model_path)
             log(f"Using model from Volume: {model_path}")
 
@@ -357,6 +357,125 @@ async def _notify_callback(callback_url: str, payload: Dict[str, Any]):
         response = await client.post(callback_url, json=payload, timeout=600.0)
         response.raise_for_status()
         return response
+
+
+@app.function(
+    image=image,
+    gpu="L4",  # KataGo needs GPU
+    timeout=300,  # 5 minutes timeout (evaluation is faster than review)
+    memory=4096,  # 4GB memory
+    volumes={str(MODEL_DIR): katago_models_volume},  # Mount Volume for models
+    secrets=[
+        modal.Secret.from_name("gcp-go-linebot"),  # GCP service account key
+    ],
+    max_containers=1,
+)
+def evaluation(
+    sgf_gcs_path: str,
+    current_turn: int,
+    visits: int = 1000,
+) -> Dict[str, Any]:
+    """
+    Execute KataGo evaluation analysis on current board position.
+
+    Args:
+        sgf_gcs_path: GCS path to SGF file (gs://bucket/path)
+        current_turn: Current turn (1=black, 2=white)
+        visits: Number of visits for KataGo analysis (default: 1000)
+
+    Returns:
+        Dict with evaluation results (territory, scoreLead, etc.)
+    """
+    import asyncio
+    import sys
+    from google.cloud import storage
+    from google.oauth2 import service_account
+
+    # Initialize logger (simple print-based for Modal)
+    def log(message: str, level: str = "INFO"):
+        print(f"[{level}] {message}")
+
+    try:
+        # Load GCP credentials from Modal secret
+        gcp_key_json = os.environ.get("GCP_SERVICE_ACCOUNT_KEY_JSON")
+        if not gcp_key_json:
+            raise ValueError("GCP_SERVICE_ACCOUNT_KEY_JSON not found in environment")
+
+        credentials_info = json.loads(gcp_key_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_info
+        )
+
+        # Initialize GCS client
+        project_id = os.environ.get("GCP_PROJECT_ID")
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+
+        if not project_id or not bucket_name:
+            raise ValueError(
+                "GCP_PROJECT_ID or GCS_BUCKET_NAME not found in environment"
+            )
+
+        storage_client = storage.Client(credentials=credentials, project=project_id)
+        bucket = storage_client.bucket(bucket_name)
+
+        # Extract GCS path
+        if sgf_gcs_path.startswith("gs://"):
+            parts = sgf_gcs_path[5:].split("/", 1)
+            remote_path = parts[1] if len(parts) > 1 else ""
+        else:
+            remote_path = sgf_gcs_path
+
+        # Download SGF file from GCS to temporary file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            local_sgf_path = temp_path / "evaluation.sgf"
+
+            log(f"Downloading SGF file from GCS: {remote_path}")
+            blob = bucket.blob(remote_path)
+            sgf_content = blob.download_as_bytes()
+            local_sgf_path.write_bytes(sgf_content)
+            log(f"Downloaded SGF file to: {local_sgf_path}")
+
+            # Handlers module is mounted at /app/handlers; ensure Python can import it
+            os.chdir("/app")
+            if "/app" not in sys.path:
+                sys.path.insert(0, "/app")
+
+            # Check if model exists in Volume
+            model_path = MODEL_DIR / MODEL_FILENAME
+            if not model_path.exists():
+                log(f"Model file not found at {model_path}", "ERROR")
+                raise FileNotFoundError(
+                    f"Model file {model_path} not found in Volume. "
+                    f"Please run 'modal run main.py::upload_model' to upload the model first."
+                )
+
+            os.environ["KATAGO_MODEL"] = str(model_path)
+            log(f"Using model from Volume: {model_path}")
+
+            from handlers.katago_handler import run_katago_analysis_evaluation
+
+            # Execute KataGo evaluation
+            log(f"Starting KataGo evaluation")
+            result = asyncio.run(
+                run_katago_analysis_evaluation(
+                    str(local_sgf_path), current_turn, visits=visits
+                )
+            )
+
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error")
+                log(f"KataGo evaluation failed: {error_msg}", "ERROR")
+                return {"success": False, "error": error_msg}
+
+            log(f"KataGo evaluation completed successfully")
+            return result
+
+    except Exception as error:
+        log(f"Error in evaluation: {error}", "ERROR")
+        import traceback
+        traceback.print_exc()
+        return {"success": False, "error": str(error)}
 
 
 # Local entrypoint to upload model to Volume
@@ -568,7 +687,7 @@ def get_ai_next_move(
             os.environ["KATAGO_MODEL"] = str(model_path)
             log(f"Using model from Volume: {model_path}")
 
-            from handlers.katago_handler import run_katago_gtp_next_move
+            from handlers.katago_handler import run_katago_gtp_next_move, run_katago_analysis_evaluation
 
             # Execute KataGo GTP to get next move
             log(f"Starting KataGo GTP for next move")

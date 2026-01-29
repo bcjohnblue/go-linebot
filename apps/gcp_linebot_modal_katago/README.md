@@ -31,6 +31,14 @@
 4. 生成當前棋盤圖片並回傳至 LINE
 ```
 
+**形勢判斷功能：**
+```
+1. 用戶在進行中的對局裡輸入「形勢」或「形式」或「evaluation」
+2. Cloud Run 取得當前對局的 SGF（GCS）並調用 Modal evaluation 函數
+3. Modal 執行 KataGo evaluation 分析（ownership / scoreLead）
+4. Cloud Run 繪製領地分布圖並上傳圖片至 GCS，回傳目數差距與圖片至 LINE
+```
+
 **AI 對弈功能：**
 
 ```
@@ -104,7 +112,9 @@
 
 7. **MODAL_FUNCTION_GET_AI_NEXT_MOVE** - Modal AI 對弈函數名稱（預設：`get_ai_next_move`）
 
-8. **KATAGO_VISITS** - KataGo 分析深度（預設：`5`）
+8. **MODAL_FUNCTION_EVALUATION** - Modal 形勢判斷函數名稱（預設：`evaluation`）
+
+9. **KATAGO_VISITS** - KataGo 分析深度（預設：`5`）
 
 **設定 Secrets Manager（用於敏感資訊）：**
 
@@ -207,6 +217,20 @@ modal volume list katago-models
 請參考 [本地完整架構 - Python 環境設定](/apps/localhost_all/README.md#1-python-環境設定) 的說明
 
 ## 功能說明
+
+### 形勢判斷功能
+
+形勢判斷功能對當前盤面進行 KataGo 評估，顯示領地分布與目數差距。
+
+**使用方式：**
+
+1. 在進行中的對局裡輸入「形勢」或「形式」或「evaluation」
+2. Bot 會回傳領地分布圖與目數文字（例如：目前形勢：黑 +3.5 目。）
+
+**技術規格：**
+
+- 分析引擎：KataGo evaluation（單一盤面）
+- score_lead 為黑棋領先的目數
 
 ### AI 對弈功能
 
@@ -329,8 +353,9 @@ gcp_linebot_modal_katago/
     │   └── katago_handler.py       # KataGo 處理
     ├── katago/                     # KataGo 相關檔案
     │   ├── models/                 # KataGo 模型（上傳至 Modal Volume）
-    │   ├── configs/                # 設定檔
-    │   └── analysis.py
+│   ├── configs/                # 設定檔
+│   ├── review.py               # 覆盤分析
+│   └── evaluation.py           # 形勢判斷
     ├── scripts/
     │   └── deploy.sh              # 部署腳本
     └── requirements.txt

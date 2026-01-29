@@ -1,6 +1,6 @@
 #!/bin/bash
-# KataGo 分析腳本
-# 使用方式: ./analysis.sh <sgf_file>
+# KataGo 覆盤分析腳本（全盤 review）
+# 使用方式: ./review.sh <sgf_file>
 # 使用 katawrap.py 來讀取 SGF 文件並傳遞給 KataGo，輸出 JSONL 格式
 
 set -e
@@ -8,16 +8,10 @@ set -e
 # 獲取腳本所在目錄
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KATAGO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LOCALHOST_KATAGO_DIR="$(cd "$KATAGO_DIR/.." && pwd)"
+LOCALHOST_ALL_DIR="$(cd "$KATAGO_DIR/.." && pwd)"
 
-# KataWrap 虛擬環境路徑（使用 localhost_katago/venv）
-VENV_PY="${VENV_PY:-/usr/local/bin/python}"
-
-# Debug: Log which Python is being used
-echo "[DEBUG] Using Python: $VENV_PY"
-echo "[DEBUG] Python version: $($VENV_PY --version 2>&1)"
-echo "[DEBUG] Checking chardet availability..."
-$VENV_PY -c "import chardet; print(f'[DEBUG] chardet found at: {chardet.__file__}')" 2>&1 || echo "[DEBUG] WARNING: chardet not available in $VENV_PY"
+# KataWrap 虛擬環境路徑（使用 localhost_all/venv）
+VENV_PY="${VENV_PY:-$LOCALHOST_ALL_DIR/venv/bin/python}"
 
 # SGF 文件參數（必需）
 SGF_FILE="$1"
@@ -70,7 +64,7 @@ else
 fi
 
 # 執行分析
-echo "Starting KataGo analysis..."
+echo "Starting KataGo review analysis..."
 echo "Config: $KATAGO_CONFIG"
 echo "Model:  $KATAGO_MODEL"
 echo "SGF File: $SGF_FILE_ABS"
@@ -79,10 +73,6 @@ echo ""
 
 # 切換到 KataGo 目錄執行（確保相對路徑正確）
 cd "$KATAGO_DIR"
-
-# 使用 katawrap.py 讀取 SGF 文件並傳遞給 KataGo
-# katawrap.py 會從標準輸入讀取 JSON 查詢，我們通過 echo 傳遞 sgfFile
-# 注意：配置文件中的 sgfFile 和 outputDir 設置會被忽略，因為我們通過 JSON 查詢傳遞
 
 # 設置輸出 JSONL 文件路徑
 OUTPUT_DIR="${OUTPUT_DIR:-$KATAGO_DIR/results}"
@@ -103,7 +93,7 @@ fi
 
 # 使用 katawrap.py 讀取 SGF 文件並傳遞給 KataGo (輸出 JSONL)
 # 輸出格式：JSONL (JSON Lines)，每行一個 JSON 對象，包含分析結果
-echo "Using katawrap.py to generate JSONL output..."
+echo "Using katawrap.py to generate JSONL output for review..."
 echo "Output file: $OUTPUT_JSONL"
 echo "Note: Output is JSONL format (not SGF)."
 echo "      Each line is a JSON object with analysis results."
@@ -119,16 +109,17 @@ echo "{\"sgfFile\": \"$SGF_FILE_ABS\"}" | \
 
 if [ $? -eq 0 ]; then
   echo ""
-  echo "Analysis completed. Output saved to: $OUTPUT_JSONL"
+  echo "Review analysis completed. Output saved to: $OUTPUT_JSONL"
 fi
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
   echo ""
-  echo "Analysis completed successfully! JSONL output generated."
+  echo "Review analysis completed successfully! JSONL output generated."
 else
   echo ""
-  echo "Error: KataGo analysis failed"
+  echo "Error: KataGo review analysis failed"
   exit 1
 fi
+

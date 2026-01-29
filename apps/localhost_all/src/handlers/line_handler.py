@@ -24,7 +24,7 @@ from sgfmill import sgf
 
 from config import config
 from logger import logger
-from handlers.katago_handler import run_katago_analysis
+from handlers.katago_handler import run_katago_analysis, run_katago_analysis_evaluation
 from handlers.sgf_handler import filter_critical_moves, get_top_winrate_diff_moves
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
@@ -256,6 +256,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 讀取 game_1234567890 10 / load game_1234567890 10 - 讀取指定 game_id 的前 N 手，並創建新對局
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
+• 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
 
 🤖 AI 對弈功能：
 • 對弈 / vs - 查看目前對弈模式狀態
@@ -672,6 +673,139 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             target_id,
             None,
             [TextMessage(text=f"❌ 執行覆盤時發生錯誤：{str(error)}")],
+        )
+
+
+async def handle_evaluation_command(target_id: str, reply_token: Optional[str]):
+    """Handle shape evaluation command (形勢判斷 / evaluation)"""
+    try:
+        state = get_game_state(target_id)
+        game = state["game"]
+        current_turn = state.get("current_turn", 1)
+        sgf_game = state["sgf_game"]
+
+        # 檢查是否有任何落子
+        has_stone = any(
+            stone != 0 for row in game.board for stone in row
+        )
+        if not has_stone:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="目前盤面沒有進行中的對局，無法進行形勢判斷。")],
+            )
+            return
+
+        # 確保 SGF 已保存
+        sgf_path = save_game_sgf(target_id)
+        if not sgf_path:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法儲存目前棋局 SGF，請稍後再試。")],
+            )
+            return
+
+        # 呼叫 KataGo analysis evaluation
+        logger.info(
+            f"Running KataGo evaluation for target_id={target_id}, sgf_path={sgf_path}"
+        )
+        result = await run_katago_analysis_evaluation(sgf_path, current_turn)
+
+        if not result.get("success"):
+            error = result.get("error", "Unknown error")
+            logger.error(f"KataGo evaluation failed: {error}")
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"❌ 形勢判斷失敗：{error}")],
+            )
+            return
+
+        territory = result.get("territory")
+        score_lead = result.get("scoreLead")
+
+        # 組形勢文字
+        if score_lead is None:
+            shape_text = "目前無法可靠判斷形勢。"
+        else:
+            try:
+                score_lead_val = float(score_lead)
+            except (TypeError, ValueError):
+                score_lead_val = 0.0
+
+            if abs(score_lead_val) < 0.05:
+                shape_text = "目前形勢：雙方大致均勢（約 0 目）。"
+            else:
+                # score_lead 一律為黑棋領先的目數（正=黑領先，負=白領先）
+                if score_lead_val > 0:
+                    leader = "黑"
+                    lead = score_lead_val
+                else:
+                    leader = "白"
+                    lead = -score_lead_val
+                lead_rounded = round(lead * 2) / 2.0
+                shape_text = f"目前形勢：{leader} +{lead_rounded:.1f} 目。"
+
+        # 從 SGF 找最後一手座標，保持 last move 高亮
+        last_coords = None
+        sequence = sgf_game.get_main_sequence()
+        for node in sequence:
+            color, move = node.get_move()
+            if move is not None:
+                sgf_r, sgf_c = move
+                r = 18 - sgf_r
+                c = sgf_c
+                last_coords = (r, c)
+
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+
+        game_id = get_game_id(target_id)
+        game_dir = static_dir / game_id
+        game_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = int(time.time())
+        filename = f"evaluation_{target_id}_{timestamp}.png"
+        output_path = game_dir / filename
+
+        visualizer.draw_board(
+            game.board,
+            last_move=last_coords,
+            output_filename=str(output_path),
+            territory=territory,
+        )
+
+        public_url = config["server"]["public_url"]
+        if public_url and is_valid_https_url(public_url):
+            relative_path = f"static/{game_id}/{filename}"
+            encoded_path = encode_url_path(relative_path)
+            image_url = f"{public_url}/{encoded_path}"
+
+            if is_valid_https_url(image_url):
+                messages = [
+                    TextMessage(text=shape_text),
+                    ImageMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url,
+                    ),
+                ]
+                await send_message(target_id, reply_token, messages)
+                return
+
+        # 若 PUBLIC_URL 無效或圖片 URL 非 https，僅回文字
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=shape_text + "\n\n⚠️ 無法顯示棋盤圖片，請檢查 PUBLIC_URL 設定。")],
+        )
+    except Exception as error:
+        logger.error(f"Error in 形勢判斷 command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 執行形勢判斷時發生錯誤：{str(error)}")],
         )
 
 
@@ -1782,6 +1916,13 @@ async def handle_text_message(event: Dict[str, Any]):
         )
         # Pass replyToken for initial reply (reduce usage)
         await handle_review_command(target_id, reply_token)
+        return
+
+    if text == "形勢" or text == "形式" or text.lower() == "evaluation":
+        target_id = (
+            source.get("groupId") or source.get("roomId") or source.get("userId")
+        )
+        await handle_evaluation_command(target_id, reply_token)
         return
 
     # Get target ID for game state management

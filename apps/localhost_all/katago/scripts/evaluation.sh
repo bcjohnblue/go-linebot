@@ -1,7 +1,7 @@
 #!/bin/bash
-# KataGo 分析腳本
-# 使用方式: ./analysis.sh <sgf_file>
-# 使用 katawrap.py 來讀取 SGF 文件並傳遞給 KataGo，輸出 JSONL 格式
+# KataGo 形勢判斷腳本（單盤面 evaluation）
+# 使用方式: ./evaluation.sh <sgf_file>
+# 使用 katawrap.py 來讀取 SGF 文件並傳遞給 KataGo，只分析最後一手並輸出 ownership JSONL
 
 set -e
 
@@ -64,7 +64,7 @@ else
 fi
 
 # 執行分析
-echo "Starting KataGo analysis..."
+echo "Starting KataGo evaluation analysis..."
 echo "Config: $KATAGO_CONFIG"
 echo "Model:  $KATAGO_MODEL"
 echo "SGF File: $SGF_FILE_ABS"
@@ -73,10 +73,6 @@ echo ""
 
 # 切換到 KataGo 目錄執行（確保相對路徑正確）
 cd "$KATAGO_DIR"
-
-# 使用 katawrap.py 讀取 SGF 文件並傳遞給 KataGo
-# katawrap.py 會從標準輸入讀取 JSON 查詢，我們通過 echo 傳遞 sgfFile
-# 注意：配置文件中的 sgfFile 和 outputDir 設置會被忽略，因為我們通過 JSON 查詢傳遞
 
 # 設置輸出 JSONL 文件路徑
 OUTPUT_DIR="${OUTPUT_DIR:-$KATAGO_DIR/results}"
@@ -87,7 +83,7 @@ SGF_BASENAME=$(basename "$SGF_FILE_ABS" .sgf)
 if [ -z "$OUTPUT_JSONL" ]; then
   # 生成時間戳（年月日時分）
   TIMESTAMP=$(date +"%Y%m%d%H%M")
-  OUTPUT_JSONL="$OUTPUT_DIR/${SGF_BASENAME}_analysis_${TIMESTAMP}.jsonl"
+  OUTPUT_JSONL="$OUTPUT_DIR/${SGF_BASENAME}_evaluation_${TIMESTAMP}.jsonl"
 else
   # 如果 OUTPUT_JSONL 是相對路徑，轉換為絕對路徑
   if [[ "$OUTPUT_JSONL" != /* ]]; then
@@ -96,15 +92,16 @@ else
 fi
 
 # 使用 katawrap.py 讀取 SGF 文件並傳遞給 KataGo (輸出 JSONL)
-# 輸出格式：JSONL (JSON Lines)，每行一個 JSON 對象，包含分析結果
-echo "Using katawrap.py to generate JSONL output..."
+# 僅分析最後一手，並輸出 ownership
+echo "Using katawrap.py to generate JSONL output for evaluation..."
 echo "Output file: $OUTPUT_JSONL"
 echo "Note: Output is JSONL format (not SGF)."
 echo "      Each line is a JSON object with analysis results."
 echo ""
 
-echo "{\"sgfFile\": \"$SGF_FILE_ABS\"}" | \
+echo "{\"sgfFile\": \"$SGF_FILE_ABS\", \"analyzeLastTurn\": true, \"includeOwnership\": true}" | \
  "$VENV_PY" "$KATAWRAP_PY" \
+  -only-last \
   -visits "$VISITS" \
   "$KATAGO_BIN" analysis \
   -config "$KATAGO_CONFIG" \
@@ -113,16 +110,17 @@ echo "{\"sgfFile\": \"$SGF_FILE_ABS\"}" | \
 
 if [ $? -eq 0 ]; then
   echo ""
-  echo "Analysis completed. Output saved to: $OUTPUT_JSONL"
+  echo "Evaluation analysis completed. Output saved to: $OUTPUT_JSONL"
 fi
 
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
   echo ""
-  echo "Analysis completed successfully! JSONL output generated."
+  echo "Evaluation analysis completed successfully! JSONL output generated."
 else
   echo ""
-  echo "Error: KataGo analysis failed"
+  echo "Error: KataGo evaluation analysis failed"
   exit 1
 fi
+

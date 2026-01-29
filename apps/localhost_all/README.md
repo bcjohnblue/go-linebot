@@ -21,6 +21,14 @@
 4. 生成當前棋盤圖片並回傳至 LINE
 ```
 
+**形勢判斷功能：**
+```
+1. 用戶在進行中的對局裡輸入「形勢」或「形式」或「evaluation」
+2. 本地服務取得當前對局的 SGF 路徑
+3. 執行 KataGo evaluation 分析（單一盤面 ownership / scoreLead）
+4. 繪製領地分布圖（實心黑/白方塊標示）並回傳目數差距與圖片至 LINE
+```
+
 **AI 對弈功能：**
 ```
 1. 用戶輸入「對弈 ai」開啟 AI 對弈模式
@@ -141,6 +149,7 @@ python src/main.py
 - `悔棋` / `undo` - 撤銷上一步
 - `讀取` / `load` - 從存檔恢復當前遊戲
 - `重置` / `reset` - 重置棋盤，開始新遊戲
+- `形勢` / `形式` / `evaluation` - 顯示當前盤面領地分布與目數差距（形勢判斷）
 
 #### 2. AI 對弈功能測試
 
@@ -193,7 +202,8 @@ localhost_all/
 ├── katago/                          # KataGo 相關檔案
 │   ├── models/                      # KataGo 模型
 │   ├── configs/                     # 設定檔
-│   └── analysis.py                  # 分析邏輯
+│   ├── review.py                    # 覆盤分析邏輯
+│   └── evaluation.py                # 形勢判斷邏輯
 ├── assets/                          # 圖片資源
 │   ├── board.png                    # 棋盤圖片
 │   ├── black.png                    # 黑子圖片

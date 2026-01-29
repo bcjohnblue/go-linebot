@@ -72,13 +72,19 @@ class BoardVisualizer:
         return paste_x, paste_y
 
     def draw_board(
-        self, board_state, last_move=None, output_filename="current_board.png", move_numbers=None
+        self,
+        board_state,
+        last_move=None,
+        output_filename="current_board.png",
+        move_numbers=None,
+        territory=None,
     ):
         """
         :param board_state: 19x19 二維陣列
         :param last_move: Tuple (row, col) 代表最後一手的位置，若無則傳入 None
         :param output_filename: 檔名
         :param move_numbers: Dict {(row, col): move_number} 標註每手棋的手順
+        :param territory: 19x19 二維陣列，0=中立, 1=黑地, 2=白地
         """
         canvas = self.base_img.copy()
         size = 19
@@ -99,7 +105,65 @@ class BoardVisualizer:
                 px, py = self.get_pixel_coords(r, c)
                 canvas.paste(stone_img, (px, py), stone_img)
 
-        # 2. ### 新增：處理最後一手 (Last Move)
+        # 2. ### 領地：實心正方形；有棋子且屬對方領地時在棋子上畫小正方形（被吃掉）
+        if territory is not None:
+            try:
+                overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+                draw_territory = ImageDraw.Draw(overlay)
+                # 實心正方形邊長的一半（空點上的領地）
+                half_side = int(self.GRID_SIZE * 0.2)
+                # 棋子上「被吃」標記的小正方形邊長的一半
+                half_side_captured = int(self.GRID_SIZE * 0.2)
+
+                for r in range(size):
+                    for c in range(size):
+                        if (
+                            r < 0
+                            or r >= len(territory)
+                            or c < 0
+                            or c >= len(territory[r])
+                        ):
+                            continue
+                        t = territory[r][c]
+                        if t not in (1, 2):
+                            continue
+
+                        center_x = self.MARGIN_X + (c * self.GRID_SIZE)
+                        center_y = self.MARGIN_Y + (r * self.GRID_SIZE)
+                        stone_color = board_state[r][c]
+
+                        if stone_color == 0:
+                            # 空點：畫實心正方形領地
+                            left = center_x - half_side
+                            top = center_y - half_side
+                            right = center_x + half_side
+                            bottom = center_y + half_side
+                            if t == 1:
+                                color = (0, 0, 0, 255)
+                            else:
+                                color = (255, 255, 255, 255)
+                            draw_territory.rectangle((left, top, right, bottom), fill=color)
+                        else:
+                            # 有棋子：若領地為對方（算被吃掉），在棋子上畫小實心正方形
+                            # t==1 黑地、t==2 白地；stone 1=黑 2=白
+                            if (t == 1 and stone_color == 2) or (t == 2 and stone_color == 1):
+                                left = center_x - half_side_captured
+                                top = center_y - half_side_captured
+                                right = center_x + half_side_captured
+                                bottom = center_y + half_side_captured
+                                if t == 1:
+                                    color = (0, 0, 0, 255)
+                                else:
+                                    color = (255, 255, 255, 255)
+                                draw_territory.rectangle((left, top, right, bottom), fill=color)
+
+                canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
+                canvas = canvas.convert("RGB")
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to draw territory overlay: {e}")
+
+        # 3. ### 新增：處理最後一手 (Last Move)
         if last_move is not None:
             lr, lc = last_move
             # 確保座標在範圍內，且該位置真的有棋子 (防呆)
