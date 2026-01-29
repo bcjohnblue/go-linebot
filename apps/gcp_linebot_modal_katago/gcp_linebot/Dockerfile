@@ -1,25 +1,28 @@
-FROM python:3.11-slim
+# ---------- Stage 1: build wheels ----------
+FROM python:3.11-slim AS builder
+WORKDIR /build
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip wheel \
+    && pip wheel --no-cache-dir --no-deps -r requirements.txt -w /wheels
+
+# ---------- Stage 2: runtime ----------
+FROM python:3.11-slim
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/*
 
-# Copy application code
 COPY . .
 
-# Expose port (Cloud Run will set PORT env var)
 EXPOSE 8080
-
-# Run the application
-# Cloud Run sets PORT env var automatically, use it or default to 8080
 CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
-
+    
