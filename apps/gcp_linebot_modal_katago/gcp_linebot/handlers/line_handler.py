@@ -779,6 +779,7 @@ async def handle_evaluation_command(target_id: str, reply_token: Optional[str]):
             if is_valid_https_url(image_url):
                 messages = [
                     TextMessage(text=shape_text),
+                    TextMessage(text="下圖勢力範圍僅供參考"),
                     ImageMessage(
                         original_content_url=image_url,
                         preview_image_url=image_url,
