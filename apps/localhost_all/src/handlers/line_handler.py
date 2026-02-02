@@ -256,6 +256,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 讀取 game_1234567890 10 / load game_1234567890 10 - 讀取指定 game_id 的前 N 手，並創建新對局
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
+• 投子 - 認輸並結束本局（會先顯示勝負，再重置棋盤）
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
 
 🤖 AI 對弈功能：
@@ -2033,6 +2034,23 @@ async def handle_text_message(event: Dict[str, Any]):
                 reply_token=reply_token,
                 messages=[TextMessage(text="❌ 關閉對弈模式失敗，請稍後再試。")],
             )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    if "投子" in text:
+        state = get_game_state(target_id)
+        current_turn = state.get("current_turn", 1)
+        resign_side = "黑" if current_turn == 1 else "白"
+        winner_side = "白" if current_turn == 1 else "黑"
+        resign_msg = f"{resign_side}方投子，{winner_side}方獲勝！"
+        reset_game_state(target_id)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[
+                TextMessage(text=resign_msg),
+                TextMessage(text="棋盤已重置，黑棋請下。"),
+            ],
+        )
         await asyncio.to_thread(line_bot_api.reply_message, request)
         return
 

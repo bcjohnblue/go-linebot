@@ -388,6 +388,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 讀取 game_1234567890 10 / load game_1234567890 10 - 讀取指定 game_id 的前 N 手，並創建新對局
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
+• 投子 - 認輸並結束本局（會先顯示勝負，再重置棋盤）
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
 
 🔐 認證功能：
@@ -2189,6 +2190,48 @@ async def handle_text_message(event: Dict[str, Any]):
                 reply_token=reply_token,
                 messages=[TextMessage(text="❌ 關閉對弈模式失敗，請稍後再試。")],
             )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    if "投子" in text:
+        current_game_id = None
+        current_sgf_url = None
+        current_turn = 1
+
+        try:
+            state_meta = await load_state_from_gcs(target_id)
+            if state_meta:
+                current_turn = state_meta.get("current_turn", 1)
+                if "game_id" in state_meta:
+                    current_game_id = state_meta["game_id"]
+                    from services.storage import file_exists, get_public_url
+
+                    sgf_remote_path = (
+                        f"target_{target_id}/boards/{current_game_id}/game.sgf"
+                    )
+                    if await file_exists(sgf_remote_path):
+                        current_sgf_url = get_public_url(sgf_remote_path)
+        except Exception as error:
+            logger.warning(f"Failed to get current SGF before 投子: {error}")
+
+        resign_side = "黑" if current_turn == 1 else "白"
+        winner_side = "白" if current_turn == 1 else "黑"
+        resign_msg = f"{resign_side}方投子，{winner_side}方獲勝！"
+
+        await reset_game_state(target_id, reply_token)
+
+        messages = [TextMessage(text=resign_msg)]
+        if current_sgf_url and is_valid_https_url(current_sgf_url) and current_game_id:
+            sgf_flex_message = create_sgf_file_flex_message(
+                current_sgf_url, current_game_id
+            )
+            messages.append(sgf_flex_message)
+        messages.append(TextMessage(text="✅ 棋盤已重置，黑棋請下。"))
+
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=messages,
+        )
         await asyncio.to_thread(line_bot_api.reply_message, request)
         return
 
