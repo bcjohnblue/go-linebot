@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -615,6 +616,47 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             target_id,
             None,
             [TextMessage(text=f"❌ 執行覆盤時發生錯誤：{str(error)}")],
+        )
+
+
+async def handle_guess_first_command(target_id: str, reply_token: Optional[str], player1: str, player2: str):
+    """Handle guess first (Nigiri) command"""
+    try:
+        # Player 1 rolls 1 (Odd) or 2 (Even)
+        p1_roll = random.choice([1, 2])
+        # Player 2 rolls 1 to 20
+        p2_roll = random.randint(1, 20)
+
+        p1_guess_odd = (p1_roll == 1)
+        p2_is_odd = (p2_roll % 2 != 0)
+
+        # Compare parity
+        # If P1 guessed correctly (same parity), P1 takes Black
+        if p1_guess_odd == p2_is_odd:
+            p1_color = "黑"
+            p2_color = "白"
+        else:
+            p1_color = "白"
+            p2_color = "黑"
+
+        p1_items = "1" if p1_roll == 1 else "2"
+        
+        message_text = (
+            f"{player1}抓{p1_items}顆，{player2}抓{p2_roll}顆，"
+            f"{player1}執{p1_color}，{player2}執{p2_color}。"
+        )
+
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=message_text)]
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_guess_first_command: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 猜先功能發生錯誤：{str(e)}")]
         )
 
 
@@ -1965,6 +2007,16 @@ async def handle_text_message(event: Dict[str, Any]):
     if text == "形勢" or text == "形式" or text.lower() == "evaluation":
         await handle_evaluation_command(target_id, reply_token)
         return
+
+    # Handle Guess First
+    if text.startswith("猜先 "):
+        parts = text.split()
+        if len(parts) >= 3:
+            player1 = parts[1]
+            player2 = parts[2]
+            target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+            await handle_guess_first_command(target_id, reply_token, player1, player2)
+            return
 
     if "悔棋" in text or "undo" in text.lower():
         await handle_undo_move(target_id, reply_token)
