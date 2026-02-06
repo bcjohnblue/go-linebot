@@ -1,7 +1,8 @@
 import os
 import re
 import json
-import time
+import  time
+import random
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -31,8 +32,10 @@ from LLM.providers.openai_provider import call_openai
 from handlers.go_engine import GoBoard
 from handlers.board_visualizer import BoardVisualizer
 
-# Initialize LINE Bot API v3
+# Initialize LINE Bot API v3 with timeout configuration
 configuration = Configuration(access_token=config["line"]["channel_access_token"])
+# Set timeout to prevent indefinite hanging (30 seconds)
+configuration.timeout = 30
 api_client = ApiClient(configuration)
 line_bot_api = MessagingApi(api_client)
 blob_api = MessagingApiBlob(api_client)
@@ -308,6 +311,9 @@ async def send_message(
     target_id: str, reply_token: Optional[str], messages: List[Any]
 ) -> bool:
     """Send message (prefer replyMessage to reduce usage, fallback to pushMessage if replyToken expired)"""
+    from urllib3.exceptions import ReadTimeoutError
+    from requests.exceptions import Timeout, ConnectionError
+    
     # If there's a replyToken, try to use replyMessage
     if reply_token:
         try:
@@ -316,6 +322,11 @@ async def send_message(
             await asyncio.to_thread(line_bot_api.reply_message, request)
             logger.info(f"Sent reply message to {target_id} (message count: {len(messages)})")
             return True  # Successfully used replyMessage
+        except (ReadTimeoutError, Timeout, ConnectionError, TimeoutError) as e:
+            # Network timeout or connection error
+            logger.error(f"Network timeout/connection error when sending reply to {target_id}: {type(e).__name__}: {e}")
+            logger.warning("Message delivery failed due to network issues. Please check your internet connection.")
+            return False  # Failed to send
         except ApiException as e:
             # replyToken may have expired, fallback to pushMessage
             if e.status in [400, 410]:
@@ -323,12 +334,23 @@ async def send_message(
             else:
                 logger.error(f"Error sending reply message to {target_id}: {e}", exc_info=True)
                 raise
+        except Exception as e:
+            logger.error(f"Unexpected error sending reply message to {target_id}: {type(e).__name__}: {e}", exc_info=True)
+            return False
 
     # Use pushMessage
-    request = PushMessageRequest(to=target_id, messages=messages)
-    await asyncio.to_thread(line_bot_api.push_message, request)
-    logger.info(f"Sent push message to {target_id} (message count: {len(messages)})")
-    return False  # Used pushMessage
+    try:
+        request = PushMessageRequest(to=target_id, messages=messages)
+        await asyncio.to_thread(line_bot_api.push_message, request)
+        logger.info(f"Sent push message to {target_id} (message count: {len(messages)})")
+        return True
+    except (ReadTimeoutError, Timeout, ConnectionError, TimeoutError) as e:
+        logger.error(f"Network timeout/connection error when sending push message to {target_id}: {type(e).__name__}: {e}")
+        logger.warning("Message delivery failed due to network issues. Please check your internet connection.")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending push message to {target_id}: {type(e).__name__}: {e}", exc_info=True)
+        return False
 
 
 async def handle_review_command(target_id: str, reply_token: Optional[str]):
@@ -416,7 +438,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
         # Call LLM to get comments
         llm_comments = await call_openai(top_score_loss_moves)
-        # llm_comments = []
+        # llm_comment = []
         logger.info(f"LLM generated {len(llm_comments)} comments")
 
         # Use result.jsonPath (full path) instead of result.jsonFilename
@@ -1826,6 +1848,47 @@ async def handle_load_game(target_id: str, reply_token: Optional[str]):
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
+async def handle_guess_first_command(target_id: str, reply_token: Optional[str], player1: str, player2: str):
+    """Handle guess first (Nigiri) command"""
+    try:
+        # Player 1 rolls 1 (Odd) or 2 (Even)
+        p1_roll = random.choice([1, 2])
+        # Player 2 rolls 1 to 20
+        p2_roll = random.randint(1, 20)
+
+        p1_guess_odd = (p1_roll == 1)
+        p2_is_odd = (p2_roll % 2 != 0)
+
+        # Compare parity
+        # If P1 guessed correctly (same parity), P1 takes Black
+        if p1_guess_odd == p2_is_odd:
+            p1_color = "黑"
+            p2_color = "白"
+        else:
+            p1_color = "白"
+            p2_color = "黑"
+
+        p1_items = "1" if p1_roll == 1 else "2"
+        
+        message_text = (
+            f"{player1}抓{p1_items}顆，{player2}抓{p2_roll}顆，"
+            f"{player1}執{p1_color}，{player2}執{p2_color}。"
+        )
+
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=message_text)]
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_guess_first_command: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 猜先功能發生錯誤：{str(e)}")]
+        )
+
+
 async def handle_text_message(event: Dict[str, Any]):
     """Handle text message"""
     reply_token = event.get("replyToken")
@@ -1926,6 +1989,21 @@ async def handle_text_message(event: Dict[str, Any]):
         )
         await handle_evaluation_command(target_id, reply_token)
         return
+
+    # Handle Guess First
+    if text.startswith("猜先 "):
+        parts = text.split()
+        if len(parts) >= 3:
+            # Join parts to handle names with potential issues, though simple split is requested
+            # User request: "猜先 對局者一 對局者二"
+            # We take index 1 and 2. 
+            # If names have spaces, this simple split might be wrong, but "猜先" usually implies simple names.
+            # Let's assume standard usage "猜先 Name1 Name2"
+            player1 = parts[1]
+            player2 = parts[2]
+            target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+            await handle_guess_first_command(target_id, reply_token, player1, player2)
+            return
 
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
