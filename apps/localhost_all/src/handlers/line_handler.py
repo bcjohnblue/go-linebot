@@ -438,7 +438,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
         # Call LLM to get comments
         llm_comments = await call_openai(top_score_loss_moves)
-        # llm_commentS = []
+        # llm_comments = []
         logger.info(f"LLM generated {len(llm_comments)} comments")
 
         # Use result.jsonPath (full path) instead of result.jsonFilename
