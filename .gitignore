@@ -17,3 +17,5 @@ build/
 # localhost_all
 apps/localhost_all/static/game_*/
 apps/localhost_all/draw/outputs/
+
+.idea/
