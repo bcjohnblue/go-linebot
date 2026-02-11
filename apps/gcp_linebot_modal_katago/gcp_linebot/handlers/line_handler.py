@@ -1096,8 +1096,30 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
         current_turn = 1  # Start with black
         last_move_coords = None
 
-        # Check if SGF specifies who starts (PL property)
+        # 1. Handle Setup Stones (AB, AW, AE) from root node
         root = sgf_game.get_root()
+        black_setup, white_setup, empty_setup = root.get_setup_stones()
+        
+        # Place Black setup stones
+        for sgf_r, sgf_c in black_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 1 # Black
+            
+        # Place White setup stones
+        for sgf_r, sgf_c in white_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 2 # White
+            
+        # Handle Empty setup (if any)
+        for sgf_r, sgf_c in empty_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 0 # Empty
+
+        # Check if SGF specifies who starts (PL property)
+        # root = sgf_game.get_root() # Already got root above
         if root.has_property("PL"):
             pl_value = root.get("PL")
             if isinstance(pl_value, (list, tuple)) and len(pl_value) > 0:
@@ -1529,6 +1551,116 @@ async def handle_board_move(
             messages=[TextMessage(text=f"❌ 處理落子時發生錯誤：{str(error)}")],
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+
+async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
+    """Handle One Line Kill Mode (一線擺滿殺棋模式)"""
+    try:
+        # Load bottom_line_game.sgf
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+        sgf_path = static_dir / "bottom_line_game.sgf"
+
+        if not sgf_path.exists():
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 找不到一線擺滿殺棋模式的棋譜檔案。")],
+            )
+            return
+
+        # Restore game state
+        restored = restore_game_from_sgf_file(str(sgf_path))
+        if not restored:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法讀取一線擺滿殺棋模式的棋譜。")],
+            )
+            return
+
+        # Update game state
+        # Create new game ID
+        new_game_id = f"onelinekill_{int(time.time())}"
+        
+        # Save state metadata
+        state = restored
+        state["game_id"] = new_game_id
+        await save_state_to_gcs(target_id, state)
+        
+        # Save SGF to GCS
+        await save_game_sgf(target_id, state)
+        
+        logger.info(f"Started One Line Kill Mode for {target_id}, game_id={new_game_id}")
+
+        # Draw board and send image
+        game = state["game"]
+        current_turn = state["current_turn"]
+        
+        # Find last move (if any)
+        last_coords = None
+        sgf_game = state["sgf_game"]
+        sequence = sgf_game.get_main_sequence()
+        for node in reversed(sequence):
+             color, move = node.get_move()
+             if move is not None:
+                 sgf_r, sgf_c = move
+                 r = 18 - sgf_r
+                 c = sgf_c
+                 last_coords = (r, c)
+                 break
+
+        # Generate Image
+        import tempfile
+        from services.storage import upload_file, get_public_url
+
+        timestamp = int(time.time())
+        filename = f"board_onelinekill_{timestamp}.png"
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        
+        visualizer.draw_board(game.board, last_move=last_coords, output_filename=tmp_path)
+        
+        # Upload to GCS
+        remote_path = f"target_{target_id}/boards/{new_game_id}/{filename}"
+        await upload_file(tmp_path, remote_path)
+        
+        # Get URL
+        image_url = get_public_url(remote_path)
+        
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+        turn_text = "黑" if current_turn == 1 else "白"
+        
+        if is_valid_https_url(image_url):
+            messages = [
+                TextMessage(text=f"開始一線擺滿殺棋模式！\n現在輪到：{turn_text}"),
+                ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url,
+                ),
+            ]
+            await send_message(target_id, reply_token, messages)
+        else:
+             await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"開始一線擺滿殺棋模式！\n現在輪到：{turn_text}\n\n⚠️ 圖片 URL 無效")],
+            )
+
+    except Exception as e:
+        logger.error(f"Error handling One Line Kill Mode: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 發生錯誤：{str(e)}")],
+        )
 
 
 async def handle_load_game_by_id_with_moves(
@@ -2061,6 +2193,10 @@ async def handle_text_message(event: Dict[str, Any]):
 
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+
+    if text == "一線擺滿殺棋模式":
+        await handle_one_line_kill_mode(target_id, reply_token)
+        return
 
     if text in ["help", "幫助", "說明"]:
         request = ReplyMessageRequest(
