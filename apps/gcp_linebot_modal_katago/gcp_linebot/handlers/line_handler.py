@@ -1559,7 +1559,7 @@ async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
     try:
         # Load bottom_line_game.sgf
         current_file = Path(__file__)
-        project_root = current_file.parent.parent.parent
+        project_root = current_file.parent.parent
         static_dir = project_root / "static"
         sgf_path = static_dir / "bottom_line_game.sgf"
 
