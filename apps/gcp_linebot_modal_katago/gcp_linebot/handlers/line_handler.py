@@ -1554,8 +1554,8 @@ async def handle_board_move(
 
 
 
-async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
-    """Handle One Line Kill Mode (一線擺滿殺棋模式)"""
+async def handle_bottom_line_kill_mode(target_id: str, reply_token: Optional[str]):
+    """Handle Bottom Line Kill Mode (一線擺滿殺棋模式)"""
     try:
         # Load bottom_line_game.sgf
         current_file = Path(__file__)
@@ -1583,7 +1583,7 @@ async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
 
         # Update game state
         # Create new game ID
-        new_game_id = f"onelinekill_{int(time.time())}"
+        new_game_id = f"bottomlinekill_{int(time.time())}"
         
         # Save state metadata
         state = restored
@@ -1593,7 +1593,7 @@ async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
         # Save SGF to GCS
         await save_game_sgf(target_id, state)
         
-        logger.info(f"Started One Line Kill Mode for {target_id}, game_id={new_game_id}")
+        logger.info(f"Started Bottom Line Kill Mode for {target_id}, game_id={new_game_id}")
 
         # Draw board and send image
         game = state["game"]
@@ -1617,7 +1617,7 @@ async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
         from services.storage import upload_file, get_public_url
 
         timestamp = int(time.time())
-        filename = f"board_onelinekill_{timestamp}.png"
+        filename = f"board_bottomlinekill_{timestamp}.png"
 
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
             tmp_path = tmp_file.name
@@ -2195,7 +2195,7 @@ async def handle_text_message(event: Dict[str, Any]):
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
 
     if text == "一線擺滿殺棋模式":
-        await handle_one_line_kill_mode(target_id, reply_token)
+        await handle_bottom_line_kill_mode(target_id, reply_token)
         return
 
     if text in ["help", "幫助", "說明"]:
