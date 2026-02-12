@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import random
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -687,6 +688,47 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
         )
 
 
+async def handle_guess_first_command(target_id: str, reply_token: Optional[str], player1: str, player2: str):
+    """Handle guess first (Nigiri) command"""
+    try:
+        # Player 1 rolls 1 (Odd) or 2 (Even)
+        p1_roll = random.choice([1, 2])
+        # Player 2 rolls 1 to 20
+        p2_roll = random.randint(1, 20)
+
+        p1_guess_odd = (p1_roll == 1)
+        p2_is_odd = (p2_roll % 2 != 0)
+
+        # Compare parity
+        # If P1 guessed correctly (same parity), P1 takes Black
+        if p1_guess_odd == p2_is_odd:
+            p1_color = "黑"
+            p2_color = "白"
+        else:
+            p1_color = "白"
+            p2_color = "黑"
+
+        p1_items = "1" if p1_roll == 1 else "2"
+        
+        message_text = (
+            f"{player1}抓{p1_items}顆，{player2}抓{p2_roll}顆，"
+            f"{player1}執{p1_color}，{player2}執{p2_color}。"
+        )
+
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=message_text)]
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_guess_first_command: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 猜先功能發生錯誤：{str(e)}")]
+        )
+
+
 async def handle_evaluation_command(target_id: str, reply_token: Optional[str]):
     """Handle shape evaluation command (形勢判斷 / evaluation)"""
     import modal
@@ -1054,8 +1096,30 @@ def restore_game_from_sgf_object(sgf_game: sgf.Sgf_game) -> Optional[Dict[str, A
         current_turn = 1  # Start with black
         last_move_coords = None
 
-        # Check if SGF specifies who starts (PL property)
+        # 1. Handle Setup Stones (AB, AW, AE) from root node
         root = sgf_game.get_root()
+        black_setup, white_setup, empty_setup = root.get_setup_stones()
+        
+        # Place Black setup stones
+        for sgf_r, sgf_c in black_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 1 # Black
+            
+        # Place White setup stones
+        for sgf_r, sgf_c in white_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 2 # White
+            
+        # Handle Empty setup (if any)
+        for sgf_r, sgf_c in empty_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 0 # Empty
+
+        # Check if SGF specifies who starts (PL property)
+        # root = sgf_game.get_root() # Already got root above
         if root.has_property("PL"):
             pl_value = root.get("PL")
             if isinstance(pl_value, (list, tuple)) and len(pl_value) > 0:
@@ -1487,6 +1551,116 @@ async def handle_board_move(
             messages=[TextMessage(text=f"❌ 處理落子時發生錯誤：{str(error)}")],
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+
+async def handle_bottom_line_kill_mode(target_id: str, reply_token: Optional[str]):
+    """Handle Bottom Line Kill Mode (一線擺滿殺棋模式)"""
+    try:
+        # Load bottom_line_game.sgf
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent
+        static_dir = project_root / "static"
+        sgf_path = static_dir / "bottom_line_game.sgf"
+
+        if not sgf_path.exists():
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 找不到一線擺滿殺棋模式的棋譜檔案。")],
+            )
+            return
+
+        # Restore game state
+        restored = restore_game_from_sgf_file(str(sgf_path))
+        if not restored:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法讀取一線擺滿殺棋模式的棋譜。")],
+            )
+            return
+
+        # Update game state
+        # Create new game ID
+        new_game_id = f"bottomlinekill_{int(time.time())}"
+        
+        # Save state metadata
+        state = restored
+        state["game_id"] = new_game_id
+        await save_state_to_gcs(target_id, state)
+        
+        # Save SGF to GCS
+        await save_game_sgf(target_id, state)
+        
+        logger.info(f"Started Bottom Line Kill Mode for {target_id}, game_id={new_game_id}")
+
+        # Draw board and send image
+        game = state["game"]
+        current_turn = state["current_turn"]
+        
+        # Find last move (if any)
+        last_coords = None
+        sgf_game = state["sgf_game"]
+        sequence = sgf_game.get_main_sequence()
+        for node in reversed(sequence):
+             color, move = node.get_move()
+             if move is not None:
+                 sgf_r, sgf_c = move
+                 r = 18 - sgf_r
+                 c = sgf_c
+                 last_coords = (r, c)
+                 break
+
+        # Generate Image
+        import tempfile
+        from services.storage import upload_file, get_public_url
+
+        timestamp = int(time.time())
+        filename = f"board_bottomlinekill_{timestamp}.png"
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        
+        visualizer.draw_board(game.board, last_move=last_coords, output_filename=tmp_path)
+        
+        # Upload to GCS
+        remote_path = f"target_{target_id}/boards/{new_game_id}/{filename}"
+        await upload_file(tmp_path, remote_path)
+        
+        # Get URL
+        image_url = get_public_url(remote_path)
+        
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+        turn_text = "黑" if current_turn == 1 else "白"
+        
+        if is_valid_https_url(image_url):
+            messages = [
+                TextMessage(text=f"開始一線擺滿殺棋模式！\n現在輪到：{turn_text}"),
+                ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url,
+                ),
+            ]
+            await send_message(target_id, reply_token, messages)
+        else:
+             await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"開始一線擺滿殺棋模式！\n現在輪到：{turn_text}\n\n⚠️ 圖片 URL 無效")],
+            )
+
+    except Exception as e:
+        logger.error(f"Error handling One Line Kill Mode: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 發生錯誤：{str(e)}")],
+        )
 
 
 async def handle_load_game_by_id_with_moves(
@@ -2020,6 +2194,10 @@ async def handle_text_message(event: Dict[str, Any]):
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
 
+    if text == "一線擺滿殺棋模式":
+        await handle_bottom_line_kill_mode(target_id, reply_token)
+        return
+
     if text in ["help", "幫助", "說明"]:
         request = ReplyMessageRequest(
             reply_token=reply_token, messages=[TextMessage(text=HELP_MESSAGE)]
@@ -2041,6 +2219,16 @@ async def handle_text_message(event: Dict[str, Any]):
     if text == "形勢" or text == "形式" or text.lower() == "evaluation":
         await handle_evaluation_command(target_id, reply_token)
         return
+
+    # Handle Guess First
+    if text.startswith("猜先 "):
+        parts = text.split()
+        if len(parts) >= 3:
+            player1 = parts[1]
+            player2 = parts[2]
+            target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+            await handle_guess_first_command(target_id, reply_token, player1, player2)
+            return
 
     if "悔棋" in text or "undo" in text.lower():
         await handle_undo_move(target_id, reply_token)

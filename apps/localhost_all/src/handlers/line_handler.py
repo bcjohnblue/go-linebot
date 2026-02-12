@@ -1,7 +1,8 @@
 import os
 import re
 import json
-import time
+import  time
+import random
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -31,8 +32,10 @@ from LLM.providers.openai_provider import call_openai
 from handlers.go_engine import GoBoard
 from handlers.board_visualizer import BoardVisualizer
 
-# Initialize LINE Bot API v3
+# Initialize LINE Bot API v3 with timeout configuration
 configuration = Configuration(access_token=config["line"]["channel_access_token"])
+# Set timeout to prevent indefinite hanging (30 seconds)
+configuration.timeout = 30
 api_client = ApiClient(configuration)
 line_bot_api = MessagingApi(api_client)
 blob_api = MessagingApiBlob(api_client)
@@ -308,6 +311,9 @@ async def send_message(
     target_id: str, reply_token: Optional[str], messages: List[Any]
 ) -> bool:
     """Send message (prefer replyMessage to reduce usage, fallback to pushMessage if replyToken expired)"""
+    from urllib3.exceptions import ReadTimeoutError
+    from requests.exceptions import Timeout, ConnectionError
+    
     # If there's a replyToken, try to use replyMessage
     if reply_token:
         try:
@@ -316,6 +322,11 @@ async def send_message(
             await asyncio.to_thread(line_bot_api.reply_message, request)
             logger.info(f"Sent reply message to {target_id} (message count: {len(messages)})")
             return True  # Successfully used replyMessage
+        except (ReadTimeoutError, Timeout, ConnectionError, TimeoutError) as e:
+            # Network timeout or connection error
+            logger.error(f"Network timeout/connection error when sending reply to {target_id}: {type(e).__name__}: {e}")
+            logger.warning("Message delivery failed due to network issues. Please check your internet connection.")
+            return False  # Failed to send
         except ApiException as e:
             # replyToken may have expired, fallback to pushMessage
             if e.status in [400, 410]:
@@ -323,12 +334,23 @@ async def send_message(
             else:
                 logger.error(f"Error sending reply message to {target_id}: {e}", exc_info=True)
                 raise
+        except Exception as e:
+            logger.error(f"Unexpected error sending reply message to {target_id}: {type(e).__name__}: {e}", exc_info=True)
+            return False
 
     # Use pushMessage
-    request = PushMessageRequest(to=target_id, messages=messages)
-    await asyncio.to_thread(line_bot_api.push_message, request)
-    logger.info(f"Sent push message to {target_id} (message count: {len(messages)})")
-    return False  # Used pushMessage
+    try:
+        request = PushMessageRequest(to=target_id, messages=messages)
+        await asyncio.to_thread(line_bot_api.push_message, request)
+        logger.info(f"Sent push message to {target_id} (message count: {len(messages)})")
+        return True
+    except (ReadTimeoutError, Timeout, ConnectionError, TimeoutError) as e:
+        logger.error(f"Network timeout/connection error when sending push message to {target_id}: {type(e).__name__}: {e}")
+        logger.warning("Message delivery failed due to network issues. Please check your internet connection.")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error sending push message to {target_id}: {type(e).__name__}: {e}", exc_info=True)
+        return False
 
 
 async def handle_review_command(target_id: str, reply_token: Optional[str]):
@@ -897,6 +919,36 @@ def restore_game_from_sgf_file(sgf_path: str) -> Optional[Dict[str, Any]]:
         current_turn = 1  # Start with black
         last_move_coords = None
 
+        # 1. Handle Setup Stones (AB, AW, AE) from root node
+        root = sgf_game.get_root()
+        black_setup, white_setup, empty_setup = root.get_setup_stones()
+        
+        # Place Black setup stones
+        for sgf_r, sgf_c in black_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 1 # Black
+            
+        # Place White setup stones
+        for sgf_r, sgf_c in white_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 2 # White
+            
+        # Handle Empty setup (if any)
+        for sgf_r, sgf_c in empty_setup:
+            r = 18 - sgf_r
+            c = sgf_c
+            game.board[r][c] = 0 # Empty
+            
+        # Check PL property (Player to play)
+        if root.has_property("PL"):
+            pl = root.get("PL")
+            if pl.lower() == "w":
+                current_turn = 2
+            else:
+                current_turn = 1
+
         # Traverse SGF to rebuild board
         for node in sgf_game.get_main_sequence():
             color, move = node.get_move()
@@ -1389,6 +1441,116 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
+async def handle_one_line_kill_mode(target_id: str, reply_token: Optional[str]):
+    """Handle One Line Kill Mode (一線擺滿殺棋模式)"""
+    try:
+        current_file = Path(__file__)
+        project_root = current_file.parent.parent.parent
+        static_dir = project_root / "static"
+        
+        # Define the SGF file path (note: using "bottom_line_game.sgf")
+        sgf_path = static_dir / "bottom_line_game.sgf"
+        
+        if not sgf_path.exists():
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="找不到一線擺滿殺棋模式的棋譜 (bottom_line_game.sgf)。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+        
+        # Restore game state
+        restored = restore_game_from_sgf_file(str(sgf_path))
+        if not restored:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="讀取失敗：無法解析棋譜檔案。")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+        
+        # Create a new unique game_id for this session to avoid conflicts
+        game_id = f"onelinekill_{int(time.time())}"
+        game_ids[target_id] = game_id
+        
+        # Save the restored state for this target_id
+        game_states[target_id] = restored
+        state = restored
+        game = state["game"]
+        current_turn = state["current_turn"]
+        
+        # Ensure the game directory exists for saving the board image
+        game_dir = static_dir / game_id
+        game_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Build move_numbers dict (empty for initial state or based on SGF)
+        # For this mode, we want to show the initial setup from the SGF
+        game_states[target_id] = restored
+        
+        # Draw board
+        timestamp = int(time.time())
+        filename = f"board_onelinekill_{target_id}_{timestamp}.png"
+        output_path = game_dir / filename
+        
+        # We don't have a "last move" to highlight initially, or we could find one if needed.
+        # For a problem setup, usually there is no last move highlighting.
+        last_coords = None
+        
+        visualizer.draw_board(
+            game.board, last_move=last_coords, output_filename=str(output_path)
+        )
+        
+        # Send board image
+        public_url = config["server"]["public_url"]
+        turn_text = "黑" if current_turn == 1 else "白"
+        
+        if public_url and is_valid_https_url(public_url):
+            relative_path = f"static/{game_id}/{filename}"
+            encoded_path = encode_url_path(relative_path)
+            image_url = f"{public_url}/{encoded_path}"
+            
+            if is_valid_https_url(image_url):
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(text=f"開始一線擺滿殺棋模式！\n目前輪到：{turn_text}"),
+                        ImageMessage(
+                            original_content_url=image_url,
+                            preview_image_url=image_url,
+                        ),
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+            else:
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[
+                        TextMessage(
+                            text=f"開始一線擺滿殺棋模式！\n目前輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
+                        )
+                    ],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+        else:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=f"開始一線擺滿殺棋模式！\n目前輪到：{turn_text}\n\n⚠️ 未設定有效的 PUBLIC_URL"
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling One Line Kill Mode: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"處理一線擺滿殺棋模式時發生錯誤：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
 async def handle_load_game_by_id(target_id: str, reply_token: Optional[str], game_id: str):
     """Handle load game by game ID (讀取 {gameid})"""
     try:
@@ -1826,6 +1988,47 @@ async def handle_load_game(target_id: str, reply_token: Optional[str]):
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
+async def handle_guess_first_command(target_id: str, reply_token: Optional[str], player1: str, player2: str):
+    """Handle guess first (Nigiri) command"""
+    try:
+        # Player 1 rolls 1 (Odd) or 2 (Even)
+        p1_roll = random.choice([1, 2])
+        # Player 2 rolls 1 to 20
+        p2_roll = random.randint(1, 20)
+
+        p1_guess_odd = (p1_roll == 1)
+        p2_is_odd = (p2_roll % 2 != 0)
+
+        # Compare parity
+        # If P1 guessed correctly (same parity), P1 takes Black
+        if p1_guess_odd == p2_is_odd:
+            p1_color = "黑"
+            p2_color = "白"
+        else:
+            p1_color = "白"
+            p2_color = "黑"
+
+        p1_items = "1" if p1_roll == 1 else "2"
+        
+        message_text = (
+            f"{player1}抓{p1_items}顆，{player2}抓{p2_roll}顆，"
+            f"{player1}執{p1_color}，{player2}執{p2_color}。"
+        )
+
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=message_text)]
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_guess_first_command: {e}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 猜先功能發生錯誤：{str(e)}")]
+        )
+
+
 async def handle_text_message(event: Dict[str, Any]):
     """Handle text message"""
     reply_token = event.get("replyToken")
@@ -1926,6 +2129,29 @@ async def handle_text_message(event: Dict[str, Any]):
         )
         await handle_evaluation_command(target_id, reply_token)
         return
+
+    # Handle One Line Kill Mode
+    if text == "一線擺滿殺棋模式":
+        target_id = (
+            source.get("groupId") or source.get("roomId") or source.get("userId")
+        )
+        await handle_one_line_kill_mode(target_id, reply_token)
+        return
+
+    # Handle Guess First
+    if text.startswith("猜先 "):
+        parts = text.split()
+        if len(parts) >= 3:
+            # Join parts to handle names with potential issues, though simple split is requested
+            # User request: "猜先 對局者一 對局者二"
+            # We take index 1 and 2. 
+            # If names have spaces, this simple split might be wrong, but "猜先" usually implies simple names.
+            # Let's assume standard usage "猜先 Name1 Name2"
+            player1 = parts[1]
+            player2 = parts[2]
+            target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+            await handle_guess_first_command(target_id, reply_token, player1, player2)
+            return
 
     # Get target ID for game state management
     target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
