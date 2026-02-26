@@ -13,10 +13,25 @@ from handlers.sgf_handler import get_top_winrate_diff_moves
 # 围棋坐标转换
 def gtp_to_coord(gtp_coord):
     """将 GTP 坐标（如 'Q16'）转换为 (x, y) 坐标（0-18）"""
-    if not gtp_coord or len(gtp_coord) < 2:
+    if not gtp_coord:
         return None
+
+    gtp_coord = str(gtp_coord).strip()
+    lower_coord = gtp_coord.lower()
+
+    # 非落子坐标（例如 KataGo/SGF 里的 pass、resign）
+    if lower_coord in {"pass", "resign"}:
+        return None
+
+    if len(gtp_coord) < 2:
+        return None
+
     letter = gtp_coord[0].upper()
-    number = int(gtp_coord[1:])
+    number_part = gtp_coord[1:]
+    if not ("A" <= letter <= "T") or letter == "I" or not number_part.isdigit():
+        return None
+
+    number = int(number_part)
 
     # A-T (跳过 I)
     if letter < "I":
