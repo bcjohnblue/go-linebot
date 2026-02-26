@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import List
 
 
-async def draw_all_moves_gif(json_file_path: str, output_dir: str = None) -> List[str]:
-    """Call Python script to draw GIFs for all topScoreLossMoves"""
+async def draw_all_moves_gif(
+    json_file_path: str, output_dir: str = None, selection_metric: str = "winrate"
+) -> List[str]:
+    """Call Python script to draw GIFs for top review moves."""
     # Get project root
     current_file = Path(__file__)
     project_root = current_file.parent.parent.parent
@@ -43,6 +45,7 @@ async def draw_all_moves_gif(json_file_path: str, output_dir: str = None) -> Lis
         str(python_script),
         json_file_path,
         output_dir,
+        selection_metric,
         cwd=str(project_root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE

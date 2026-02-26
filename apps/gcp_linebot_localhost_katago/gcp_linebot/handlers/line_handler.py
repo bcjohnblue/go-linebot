@@ -38,6 +38,9 @@ blob_api = MessagingApiBlob(api_client)
 # Initialize board visualizer (shared instance)
 visualizer = BoardVisualizer()
 
+DEFAULT_REVIEW_SELECTION_METRIC = "winrate"
+REVIEW_SELECTION_METRICS = {"winrate", "score_loss"}
+
 # ============================================================================
 # State persistence functions (GCS-based, for Cloud Run stateless instances)
 # ============================================================================
@@ -90,6 +93,56 @@ async def load_state_from_gcs(target_id: str) -> Optional[Dict[str, Any]]:
             f"Failed to load state from GCS for {target_id}: {error}", exc_info=True
         )
         return None
+
+
+async def save_review_selection_metric(target_id: str, metric: str) -> bool:
+    """Save review move-selection metric to GCS."""
+    try:
+        normalized = (metric or "").strip().lower()
+        if normalized not in REVIEW_SELECTION_METRICS:
+            return False
+
+        from services.storage import upload_buffer
+
+        remote_path = f"target_{target_id}/state/review_setting.json"
+        payload = json.dumps({"selection_metric": normalized}).encode("utf-8")
+        await upload_buffer(
+            payload,
+            remote_path,
+            content_type="application/json",
+            cache_control="no-store",
+        )
+        logger.info(f"Saved review selection metric for {target_id}: {normalized}")
+        return True
+    except Exception as error:
+        logger.error(
+            f"Failed to save review selection metric for {target_id}: {error}",
+            exc_info=True,
+        )
+        return False
+
+
+async def get_review_selection_metric(target_id: str) -> str:
+    """Load review move-selection metric from GCS (default: winrate)."""
+    try:
+        from services.storage import download_file_as_text, file_exists
+
+        remote_path = f"target_{target_id}/state/review_setting.json"
+        if not await file_exists(remote_path):
+            return DEFAULT_REVIEW_SELECTION_METRIC
+
+        setting_text = await download_file_as_text(remote_path)
+        setting_data = json.loads(setting_text)
+        metric = str(setting_data.get("selection_metric", "")).strip().lower()
+        if metric in REVIEW_SELECTION_METRICS:
+            return metric
+        return DEFAULT_REVIEW_SELECTION_METRIC
+    except Exception as error:
+        logger.error(
+            f"Failed to load review selection metric for {target_id}: {error}",
+            exc_info=True,
+        )
+        return DEFAULT_REVIEW_SELECTION_METRIC
 
 
 async def save_sgf_file_path(target_id: str, sgf_path: str, file_name: str) -> bool:
@@ -397,6 +450,9 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 
 📊 覆盤分析功能：
 • 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
+• review setting - 顯示目前關鍵手數挑選依據
+• review setting winrate - 以勝率落差挑選前 20 手
+• review setting score_loss - 以目差損失挑選前 20 手
 
 覆盤使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
@@ -406,7 +462,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 覆盤分析結果包含：
 • 🗺️ 全盤手順圖 - 顯示整局棋的所有手順
 • 📈 勝率變化圖 - 顯示黑方勝率隨手數的變化曲線
-• 🎬 關鍵手數 GIF 動畫 - 勝率差距最大的前 20 手動態演示
+• 🎬 關鍵手數 GIF 動畫 - 依設定（勝率落差或目差損失）挑選前 20 手動態演示
 • 💬 ChatGPT 評論 - 針對關鍵手數的評論
 
 技術規格：
@@ -554,6 +610,11 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             )
             return
 
+        selection_metric = await get_review_selection_metric(target_id)
+        selection_metric_text = (
+            "勝率落差" if selection_metric == "winrate" else "目差損失"
+        )
+
         # Notify start of review (use replyMessage if available)
         sgf_file_name = os.path.basename(sgf_gcs_path)
         # Only process SGF files, ignore other file types (e.g., JSON files)
@@ -571,7 +632,10 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             reply_token,
             [
                 TextMessage(
-                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 10 分鐘...，請稍後再回來查看分析結果。"
+                    text=(
+                        f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析（關鍵手數依據：{selection_metric_text}），"
+                        "完成大約需要 10 分鐘...，請稍後再回來查看分析結果。"
+                    )
                 )
             ],
         )
@@ -604,6 +668,76 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             target_id,
             None,
             [TextMessage(text=f"❌ 執行覆盤時發生錯誤：{str(error)}")],
+        )
+
+
+async def handle_review_setting_command(
+    target_id: str, reply_token: Optional[str], metric: Optional[str] = None
+):
+    """Handle review setting command."""
+    try:
+        if not metric:
+            current_metric = await get_review_selection_metric(target_id)
+            current_text = "勝率落差" if current_metric == "winrate" else "目差損失"
+            await send_message(
+                target_id,
+                reply_token,
+                [
+                    TextMessage(
+                        text=(
+                            "📊 覆盤關鍵手數挑選設定\n"
+                            f"目前：{current_text}（{current_metric}）\n\n"
+                            "可用指令：\n"
+                            "• review setting winrate\n"
+                            "• review setting score_loss"
+                        )
+                    )
+                ],
+            )
+            return
+
+        normalized = metric.strip().lower()
+        if normalized not in REVIEW_SELECTION_METRICS:
+            await send_message(
+                target_id,
+                reply_token,
+                [
+                    TextMessage(
+                        text=(
+                            "❌ 覆盤設定無效，請使用：\n"
+                            "• review setting winrate\n"
+                            "• review setting score_loss"
+                        )
+                    )
+                ],
+            )
+            return
+
+        success = await save_review_selection_metric(target_id, normalized)
+        if not success:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 儲存覆盤設定失敗，請稍後再試。")],
+            )
+            return
+
+        metric_text = "勝率落差" if normalized == "winrate" else "目差損失"
+        await send_message(
+            target_id,
+            reply_token,
+            [
+                TextMessage(
+                    text=f"✅ 已更新覆盤設定：{metric_text}（{normalized}）。\n後續 review 將依此挑選前 20 手。"
+                )
+            ],
+        )
+    except Exception as error:
+        logger.error(f"Error in review setting command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 設定覆盤參數時發生錯誤：{str(error)}")],
         )
 
 
@@ -1690,6 +1824,14 @@ async def handle_text_message(event: Dict[str, Any]):
             reply_token=reply_token, messages=[TextMessage(text=HELP_MESSAGE)]
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    review_setting_match = re.match(
+        r"^(?:review\s+setting|覆盤設定)(?:\s+([a-zA-Z_]+))?$", text, re.IGNORECASE
+    )
+    if review_setting_match:
+        metric = review_setting_match.group(1)
+        await handle_review_setting_command(target_id, reply_token, metric)
         return
 
     if text == "覆盤" or text.lower() == "review":

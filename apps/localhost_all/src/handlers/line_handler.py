@@ -26,7 +26,7 @@ from sgfmill import sgf
 from config import config
 from logger import logger
 from handlers.katago_handler import run_katago_analysis, run_katago_analysis_evaluation
-from handlers.sgf_handler import filter_critical_moves, get_top_winrate_diff_moves
+from handlers.sgf_handler import filter_critical_moves, get_top_review_moves
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
 from handlers.go_engine import GoBoard
@@ -56,6 +56,12 @@ game_ids: Dict[str, str] = {}
 # VS AI mode management (per target_id)
 # Key: target_id, Value: bool (True if VS AI mode is enabled)
 vs_ai_modes: Dict[str, bool] = {}
+
+# Review selection setting management (per target_id)
+# Key: target_id, Value: "winrate" | "score_loss"
+review_selection_metrics: Dict[str, str] = {}
+DEFAULT_REVIEW_SELECTION_METRIC = "winrate"
+REVIEW_SELECTION_METRICS = {"winrate", "score_loss"}
 
 # Initialize board visualizer (shared instance)
 current_file = Path(__file__)
@@ -91,6 +97,21 @@ async def get_bot_display_name() -> Optional[str]:
             logger.error(f"Failed to get bot info: {error}", exc_info=True)
             return None
     return bot_display_name
+
+
+def get_review_selection_metric(target_id: str) -> str:
+    """Get review move-selection metric for target (default: winrate)."""
+    metric = review_selection_metrics.get(target_id, DEFAULT_REVIEW_SELECTION_METRIC)
+    return metric if metric in REVIEW_SELECTION_METRICS else DEFAULT_REVIEW_SELECTION_METRIC
+
+
+def save_review_selection_metric(target_id: str, metric: str) -> bool:
+    """Save review move-selection metric for target."""
+    normalized = (metric or "").strip().lower()
+    if normalized not in REVIEW_SELECTION_METRICS:
+        return False
+    review_selection_metrics[target_id] = normalized
+    return True
 
 
 def is_valid_https_url(url: str) -> bool:
@@ -269,6 +290,9 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 
 📊 覆盤分析功能：
 • 覆盤 / review - 對最新上傳的棋譜執行 KataGo 覆盤分析
+• review setting - 顯示目前關鍵手數挑選依據
+• review setting winrate - 以勝率落差挑選前 20 手
+• review setting score_loss - 以目差損失挑選前 20 手
 
 覆盤使用流程：
 1️⃣ 上傳 SGF 棋譜檔案
@@ -278,7 +302,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 覆盤分析結果包含：
 • 🗺️ 全盤手順圖 - 顯示整局棋的所有手順
 • 📈 勝率變化圖 - 顯示黑方勝率隨手數的變化曲線
-• 🎬 關鍵手數 GIF 動畫 - 勝率差距最大的前 20 手動態演示
+• 🎬 關鍵手數 GIF 動畫 - 依設定（勝率落差或目差損失）挑選前 20 手動態演示
 • 💬 ChatGPT 評論 - 針對關鍵手數的評論
 
 技術規格：
@@ -371,6 +395,10 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             return
 
         sgf_path = static_dir / sgf_file_name
+        selection_metric = get_review_selection_metric(target_id)
+        selection_metric_text = (
+            "勝率落差" if selection_metric == "winrate" else "目差損失"
+        )
 
         # Notify start of analysis (use replyMessage if available)
         used_reply_token = await send_message(
@@ -378,7 +406,10 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             reply_token,
             [
                 TextMessage(
-                    text=f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析，完成大約需要 10 分鐘...，請稍後再回來查看分析結果。"
+                    text=(
+                        f"✅ 開始對棋譜：{sgf_file_name} 進行覆盤分析（關鍵手數依據：{selection_metric_text}），"
+                        "完成大約需要 10 分鐘...，請稍後再回來查看分析結果。"
+                    )
                 )
             ],
         )
@@ -422,6 +453,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 📊 分析結果：
 • 檔案：{sgf_file_name}
 • 總手數：{len(result['moveStats']['moves'])}
+• 關鍵手數挑選依據：{selection_metric_text}
 
 🤖 接續使用 ChatGPT 分析 20 筆關鍵手數並生成評論，大約需要 1 分鐘...，請稍後再回來查看評論結果。"""
                 )
@@ -430,14 +462,14 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
 
         # Filter top 20 critical points
         # critical_moves = filter_critical_moves(result["moveStats"]["moves"])
-        top_score_loss_moves = get_top_winrate_diff_moves(
-            result["moveStats"]["moves"], 20
+        top_review_moves = get_top_review_moves(
+            result["moveStats"]["moves"], 20, metric=selection_metric
         )
 
         logger.info("Preparing to call OpenAI...")
 
         # Call LLM to get comments
-        llm_comments = await call_openai(top_score_loss_moves)
+        llm_comments = await call_openai(top_review_moves)
         # llm_comments = []
         logger.info(f"LLM generated {len(llm_comments)} comments")
 
@@ -459,7 +491,9 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
         logger.info(f"JSON file path: {json_file_path}")
         logger.info(f"Output directory: {output_dir}")
 
-        gif_paths = await draw_all_moves_gif(json_file_path, str(output_dir))
+        gif_paths = await draw_all_moves_gif(
+            json_file_path, str(output_dir), selection_metric=selection_metric
+        )
         logger.info(f"Generated {len(gif_paths)} GIFs")
 
         # Create comment mapping (move number -> comment)
@@ -555,7 +589,7 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             []
         )  # Messages that can't generate bubbles (e.g., invalid URL)
 
-        for i, move in enumerate(top_score_loss_moves):
+        for i, move in enumerate(top_review_moves):
             move_number = move["move"]
             comment = comment_map.get(move_number, "無評論")
             gif_path = gif_map.get(move_number)
@@ -696,6 +730,68 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             target_id,
             None,
             [TextMessage(text=f"❌ 執行覆盤時發生錯誤：{str(error)}")],
+        )
+
+
+async def handle_review_setting_command(
+    target_id: str, reply_token: Optional[str], metric: Optional[str] = None
+):
+    """Handle review setting command."""
+    try:
+        if not metric:
+            current_metric = get_review_selection_metric(target_id)
+            current_text = "勝率落差" if current_metric == "winrate" else "目差損失"
+            await send_message(
+                target_id,
+                reply_token,
+                [
+                    TextMessage(
+                        text=(
+                            "📊 覆盤關鍵手數挑選設定\n"
+                            f"目前：{current_text}（{current_metric}）\n\n"
+                            "可用指令：\n"
+                            "• review setting winrate\n"
+                            "• review setting score_loss"
+                        )
+                    )
+                ],
+            )
+            return
+
+        normalized = metric.strip().lower()
+        if normalized not in REVIEW_SELECTION_METRICS:
+            await send_message(
+                target_id,
+                reply_token,
+                [
+                    TextMessage(
+                        text=(
+                            "❌ 覆盤設定無效，請使用：\n"
+                            "• review setting winrate\n"
+                            "• review setting score_loss"
+                        )
+                    )
+                ],
+            )
+            return
+
+        save_review_selection_metric(target_id, normalized)
+        metric_text = "勝率落差" if normalized == "winrate" else "目差損失"
+        await send_message(
+            target_id,
+            reply_token,
+            [
+                TextMessage(
+                    text=f"✅ 已更新覆盤設定：{metric_text}（{normalized}）。\n後續 review 將依此挑選前 20 手。"
+                )
+            ],
+        )
+    except Exception as error:
+        logger.error(f"Error in review setting command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 設定覆盤參數時發生錯誤：{str(error)}")],
         )
 
 
@@ -2112,6 +2208,17 @@ async def handle_text_message(event: Dict[str, Any]):
             reply_token=reply_token, messages=[TextMessage(text=HELP_MESSAGE)]
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    review_setting_match = re.match(
+        r"^(?:review\s+setting|覆盤設定)(?:\s+([a-zA-Z_]+))?$", text, re.IGNORECASE
+    )
+    if review_setting_match:
+        target_id = (
+            source.get("groupId") or source.get("roomId") or source.get("userId")
+        )
+        metric = review_setting_match.group(1)
+        await handle_review_setting_command(target_id, reply_token, metric)
         return
 
     if text == "覆盤" or text.lower() == "review":

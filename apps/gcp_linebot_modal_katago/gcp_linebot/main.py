@@ -11,7 +11,7 @@ from logger import logger
 # Import handlers
 from handlers.line_handler import handle_text_message, handle_file_message
 from handlers.sgf_handler import (
-    get_top_winrate_diff_moves,
+    get_top_review_moves,
 )
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
@@ -95,8 +95,11 @@ async def process_review_results(
     """Process review results in background: LLM analysis + GIF generation"""
     try:
         # Import here to avoid circular imports
-        from handlers.line_handler import send_message
+        from handlers.line_handler import send_message, get_review_selection_metric
         from linebot.v3.messaging.models import TextMessage, ImageMessage
+
+        selection_metric = await get_review_selection_metric(target_id)
+        metric_text = "勝率落差" if selection_metric == "winrate" else "目差損失"
 
         # 通知用户覆盤完成，准备进行 LLM 分析
         await send_message(
@@ -108,14 +111,21 @@ async def process_review_results(
 
 📊 覆盤結果：
 • 總手數：{len(move_stats.get('moves', []))}
+• 關鍵手數挑選依據：{metric_text}
 
 🤖 接續使用 ChatGPT 分析 20 筆關鍵手數並生成評論，大約需要 1 分鐘...，請稍後再回來查看評論結果。"""
                 )
             ],
         )
 
-        # 筛选出前 20 个胜率差距最大的关键手数
-        top_moves = get_top_winrate_diff_moves(move_stats["moves"], 20)
+        logger.info(
+            f"Review selection metric for {target_id}: {selection_metric} ({metric_text})"
+        )
+
+        # 筛选出前 20 个关键手数（可切换：胜率落差 / 目差损失）
+        top_moves = get_top_review_moves(
+            move_stats.get("moves", []), 20, metric=selection_metric
+        )
 
         logger.info("Preparing to call OpenAI...")
 
@@ -168,7 +178,9 @@ async def process_review_results(
             # 生成 GIF 动画（为每个关键手数生成动画）
             output_dir = temp_path / "gifs"
             output_dir.mkdir(exist_ok=True)
-            gif_paths = await draw_all_moves_gif(str(json_file_path), str(output_dir))
+            gif_paths = await draw_all_moves_gif(
+                str(json_file_path), str(output_dir), selection_metric=selection_metric
+            )
             logger.info(f"Generated {len(gif_paths)} GIFs")
 
             # 将生成的 GIF 上传到 GCS

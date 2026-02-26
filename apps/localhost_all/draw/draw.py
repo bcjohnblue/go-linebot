@@ -835,16 +835,40 @@ def get_top_winrate_diff_moves(moves, top_n=20):
     return top_moves
 
 
+def get_top_score_loss_moves(moves, top_n=20):
+    """获取目差损失（score_loss）最大的 top_n 个 moves，并按 move 排序"""
+
+    def get_score_loss(move):
+        score_loss = move.get("score_loss")
+        if score_loss is not None and isinstance(score_loss, (int, float)):
+            return score_loss if score_loss > 0 else 0.0
+        return 0.0
+
+    sorted_moves = sorted(moves, key=get_score_loss, reverse=True)
+    top_moves = sorted_moves[:top_n]
+    top_moves.sort(key=lambda x: x.get("move", 0))
+    return top_moves
+
+
 def main():
     """主函数"""
     if len(sys.argv) < 3:
-        print("Usage: draw.py <json_file> <output_dir>")
+        print("Usage: draw.py <json_file> <output_dir> [selection_metric]")
         print("  json_file: JSON 文件路径（包含 moves 数据）")
         print("  output_dir: 输出目录")
+        print("  selection_metric: winrate 或 score_loss（默认 winrate）")
         sys.exit(1)
 
     json_file = sys.argv[1]
     output_dir = sys.argv[2]
+    selection_metric = (
+        sys.argv[3].strip().lower() if len(sys.argv) >= 4 else "winrate"
+    )
+    if selection_metric not in {"winrate", "score_loss"}:
+        print(
+            f"Warning: invalid selection_metric '{selection_metric}', fallback to 'winrate'"
+        )
+        selection_metric = "winrate"
 
     # 读取 JSON 文件
     with open(json_file, "r", encoding="utf-8") as f:
@@ -853,9 +877,12 @@ def main():
     # 获取所有 moves（用于构建棋盘状态）
     all_moves = data.get("moves", [])
 
-    # 过滤并获取 topScoreLossMoves（前 20 个）
+    # 过滤并获取 top moves（前 20 个）
     # critical_moves = filter_critical_moves(all_moves, threshold=2.0)
-    top_moves = get_top_winrate_diff_moves(all_moves, top_n=20)
+    if selection_metric == "score_loss":
+        top_moves = get_top_score_loss_moves(all_moves, top_n=20)
+    else:
+        top_moves = get_top_winrate_diff_moves(all_moves, top_n=20)
 
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)

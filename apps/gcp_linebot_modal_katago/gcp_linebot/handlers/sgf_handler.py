@@ -244,3 +244,30 @@ def get_top_winrate_diff_moves(moves: list, top_n: int = 20) -> list:
 
     # Finally sort by move number ascending
     return sorted(top_moves, key=lambda x: x["move"])
+
+
+def get_top_score_loss_moves(moves: list, top_n: int = 20) -> list:
+    """Get top N moves with highest score loss."""
+    if not moves or not isinstance(moves, list):
+        return []
+
+    moves_with_score_loss = [
+        move
+        for move in moves
+        if move.get("score_loss") is not None
+        and isinstance(move.get("score_loss"), (int, float))
+        and move.get("score_loss") > 0
+    ]
+
+    sorted_by_score_loss = sorted(
+        moves_with_score_loss, key=lambda x: x["score_loss"], reverse=True
+    )
+    top_moves = sorted_by_score_loss[:top_n]
+    return sorted(top_moves, key=lambda x: x["move"])
+
+
+def get_top_review_moves(moves: list, top_n: int = 20, metric: str = "winrate") -> list:
+    """Get top review moves by selected metric: winrate or score_loss."""
+    if metric == "score_loss":
+        return get_top_score_loss_moves(moves, top_n)
+    return get_top_winrate_diff_moves(moves, top_n)

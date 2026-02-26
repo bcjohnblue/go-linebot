@@ -7,7 +7,7 @@ from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont
 import imageio
 import numpy as np
-from handlers.sgf_handler import get_top_winrate_diff_moves
+from handlers.sgf_handler import get_top_review_moves
 
 
 # 围棋坐标转换
@@ -804,8 +804,10 @@ def filter_critical_moves(moves, threshold=2.0):
     return [m for m in moves if get_score_loss(m) > threshold]
 
 
-async def draw_all_moves_gif(json_file_path: str, output_dir: str) -> List[str]:
-    """Call integrated functions to draw GIFs for all topScoreLossMoves"""
+async def draw_all_moves_gif(
+    json_file_path: str, output_dir: str, selection_metric: str = "winrate"
+) -> List[str]:
+    """Call integrated functions to draw GIFs for top review moves."""
 
     print(f"Drawing all moves GIFs to outputDir: {output_dir}")
 
@@ -819,8 +821,8 @@ async def draw_all_moves_gif(json_file_path: str, output_dir: str) -> List[str]:
     # Get all moves (for building board state)
     all_moves = data.get("moves", [])
 
-    # Filter and get topScoreLossMoves (top 20)
-    top_moves = get_top_winrate_diff_moves(all_moves, top_n=20)
+    # Filter and get top moves (top 20) by selected metric
+    top_moves = get_top_review_moves(all_moves, top_n=20, metric=selection_metric)
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
