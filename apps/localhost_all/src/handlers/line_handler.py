@@ -276,6 +276,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 🎮 對局功能：
 • 輸入座標（如 D4, Q16）- 落子並顯示棋盤
 • 悔棋 / undo - 撤銷上一步
+• 悔棋 10 / undo 10 - 撤銷指定手數
 • 讀取 / load - 從存檔恢復當前遊戲
 • 讀取 game_1234567890 / load game_1234567890 - 讀取指定 game_id 的棋譜
 • 讀取 game_1234567890 10 / load game_1234567890 10 - 讀取指定 game_id 的前 N 手，並創建新對局
@@ -1383,9 +1384,19 @@ async def handle_board_move(
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
 
-async def handle_undo_move(target_id: str, reply_token: Optional[str]):
-    """Handle undo move (悔棋)"""
+async def handle_undo_move(
+    target_id: str, reply_token: Optional[str], undo_steps: int = 1
+):
+    """Handle undo move (悔棋), supports multiple steps."""
     try:
+        if undo_steps <= 0:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[TextMessage(text="悔棋手數需為正整數，例如：悔棋 10")],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
         if target_id not in game_states:
             request = ReplyMessageRequest(
                 reply_token=reply_token,
@@ -1397,22 +1408,24 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
         state = game_states[target_id]
         sgf_game = state["sgf_game"]
 
-        # Get last node
-        last_node = sgf_game.get_last_node()
-        parent_node = last_node.parent
-
-        # Check if it's root node (can't undo)
-        if parent_node is None:
-            request = ReplyMessageRequest(
-                reply_token=reply_token,
-                messages=[TextMessage(text="目前是初始狀態，無法悔棋。")],
-            )
-            await asyncio.to_thread(line_bot_api.reply_message, request)
-            return
-
         try:
-            # Delete last move from SGF
-            last_node.delete()
+            # Delete N moves from SGF (or until root)
+            actual_undo_steps = 0
+            for _ in range(undo_steps):
+                last_node = sgf_game.get_last_node()
+                parent_node = last_node.parent
+                if parent_node is None:
+                    break
+                last_node.delete()
+                actual_undo_steps += 1
+
+            if actual_undo_steps == 0:
+                request = ReplyMessageRequest(
+                    reply_token=reply_token,
+                    messages=[TextMessage(text="目前是初始狀態，無法悔棋。")],
+                )
+                await asyncio.to_thread(line_bot_api.reply_message, request)
+                return
 
             # Save updated SGF
             save_game_sgf(target_id)
@@ -1481,6 +1494,13 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
             # Send board image
             public_url = config["server"]["public_url"]
             turn_text = "黑" if current_turn == 1 else "白"
+            undo_text = (
+                "↩️ 已悔棋一步。"
+                if actual_undo_steps == 1
+                else f"↩️ 已悔棋 {actual_undo_steps} 手。"
+            )
+            if actual_undo_steps < undo_steps:
+                undo_text += f"\n（要求 {undo_steps} 手，實際 {actual_undo_steps} 手）"
 
             if public_url and is_valid_https_url(public_url):
                 relative_path = f"static/{game_id}/{filename}"
@@ -1491,7 +1511,7 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
                     request = ReplyMessageRequest(
                         reply_token=reply_token,
                         messages=[
-                            TextMessage(text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}"),
+                            TextMessage(text=f"{undo_text}\n現在輪到：{turn_text}"),
                             ImageMessage(
                                 original_content_url=image_url,
                                 preview_image_url=image_url,
@@ -1504,7 +1524,7 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
                         reply_token=reply_token,
                         messages=[
                             TextMessage(
-                                text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
+                                text=f"{undo_text}\n現在輪到：{turn_text}\n\n⚠️ 圖片 URL 無效"
                             )
                         ],
                     )
@@ -1514,7 +1534,7 @@ async def handle_undo_move(target_id: str, reply_token: Optional[str]):
                     reply_token=reply_token,
                     messages=[
                         TextMessage(
-                            text=f"↩️ 已悔棋一步。\n現在輪到：{turn_text}\n\n⚠️ 未設定有效的 PUBLIC_URL"
+                            text=f"{undo_text}\n現在輪到：{turn_text}\n\n⚠️ 未設定有效的 PUBLIC_URL"
                         )
                     ],
                 )
@@ -1728,7 +1748,7 @@ async def handle_load_game_by_id(target_id: str, reply_token: Optional[str], gam
         # Send board image
         public_url = config["server"]["public_url"]
         turn_text = "黑" if current_turn == 1 else "白"
-        total_moves = len(move_numbers)
+        total_moves = move_num
         total_moves_text = f"總手數：{total_moves} 手"
         
         if public_url and is_valid_https_url(public_url):
@@ -2034,7 +2054,7 @@ async def handle_load_game(target_id: str, reply_token: Optional[str]):
         # Send board image
         public_url = config["server"]["public_url"]
         turn_text = "黑" if current_turn == 1 else "白"
-        total_moves = len(move_numbers)
+        total_moves = move_num
         total_moves_text = f"總手數：{total_moves} 手"
 
         if public_url and is_valid_https_url(public_url):
@@ -2396,8 +2416,10 @@ async def handle_text_message(event: Dict[str, Any]):
         await asyncio.to_thread(line_bot_api.reply_message, request)
         return
 
-    if "悔棋" in text or "undo" in text.lower():
-        await handle_undo_move(target_id, reply_token)
+    undo_match = re.match(r"^(?:悔棋|undo)(?:\s+(\d+))?$", text, re.IGNORECASE)
+    if undo_match:
+        undo_steps = int(undo_match.group(1)) if undo_match.group(1) else 1
+        await handle_undo_move(target_id, reply_token, undo_steps=undo_steps)
         return
 
     if "讀取" in text or "load" in text.lower():
