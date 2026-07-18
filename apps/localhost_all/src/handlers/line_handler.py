@@ -275,6 +275,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 
 🎮 對局功能：
 • 輸入座標（如 D4, Q16）- 落子並顯示棋盤
+• 虛手 / 停一手 / pass - 虛手（不落子），換對方繼續下
 • 悔棋 / undo - 撤銷上一步
 • 悔棋 10 / undo 10 - 撤銷指定手數
 • 讀取 / load - 從存檔恢復當前遊戲
@@ -1088,6 +1089,11 @@ def restore_game_from_sgf_file(sgf_path: str) -> Optional[Dict[str, Any]]:
 
                 # Switch turn
                 current_turn = 2 if stone_val == 1 else 1
+            elif color in ("b", "w"):
+                # Pass move (虛手): no stone placed, but the turn switches
+                # and any ko ban is lifted
+                game.ko_point = None
+                current_turn = 2 if color == "b" else 1
 
         return {
             "game": game,
@@ -1380,6 +1386,71 @@ async def handle_board_move(
         request = ReplyMessageRequest(
             reply_token=reply_token,
             messages=[TextMessage(text=f"❌ 處理落子時發生錯誤：{str(error)}")],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+
+async def handle_pass_move(target_id: str, reply_token: Optional[str]):
+    """Handle pass move (虛手): record a pass in SGF and hand the turn to the other side"""
+    try:
+        state = get_game_state(target_id)
+        game = state["game"]
+        current_turn = state["current_turn"]
+        sgf_game = state["sgf_game"]
+
+        # --- 1. Update SGF record (move=None means pass) ---
+        node = sgf_game.get_last_node()
+        new_node = node.new_child()
+        color_code = "b" if current_turn == 1 else "w"
+        new_node.set_move(color_code, None)
+
+        # --- 2. Pass lifts the ko ban and switches turn ---
+        game.ko_point = None
+        state["current_turn"] = 2 if current_turn == 1 else 1
+
+        # Save SGF file
+        sgf_path = save_game_sgf(target_id)
+        if sgf_path:
+            logger.info(f"Saved game SGF after pass: {sgf_path}")
+
+        pass_side = "黑" if current_turn == 1 else "白"
+        next_side = "白" if current_turn == 1 else "黑"
+        pass_msg = f"⏭️ {pass_side}方虛手（pass），輪到{next_side}方繼續下棋。"
+
+        # Check if VS AI mode is enabled: after user's pass, AI plays the next move
+        vs_ai_mode = is_vs_ai_mode(target_id)
+        if vs_ai_mode and sgf_path:
+            try:
+                ai_current_turn = state["current_turn"]
+
+                # Spawn async task to get AI's next move
+                asyncio.create_task(
+                    handle_ai_next_move(
+                        target_id=target_id,
+                        sgf_path=sgf_path,
+                        current_turn=ai_current_turn,
+                        reply_token=reply_token,
+                        user_board_image_url=None,  # Pass leaves the board unchanged
+                    )
+                )
+                logger.info(f"Spawned AI next move task after pass: target_id={target_id}, current_turn={ai_current_turn}")
+                # Don't send reply here, wait for AI to respond
+                return
+            except Exception as ai_error:
+                logger.error(f"Error spawning AI next move task after pass: {ai_error}", exc_info=True)
+                # If error, fall through to send pass message
+
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=pass_msg)],
+        )
+        await asyncio.to_thread(line_bot_api.reply_message, request)
+
+    except Exception as error:
+        logger.error(f"Error handling pass move: {error}", exc_info=True)
+        request = ReplyMessageRequest(
+            reply_token=reply_token,
+            messages=[TextMessage(text=f"❌ 處理虛手時發生錯誤：{str(error)}")],
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
 
@@ -2414,6 +2485,10 @@ async def handle_text_message(event: Dict[str, Any]):
             messages=[TextMessage(text="棋盤已重置，黑棋請下。")],
         )
         await asyncio.to_thread(line_bot_api.reply_message, request)
+        return
+
+    if text == "虛手" or text == "停一手" or text.lower() == "pass":
+        await handle_pass_move(target_id, reply_token)
         return
 
     undo_match = re.match(r"^(?:悔棋|undo)(?:\s+(\d+))?$", text, re.IGNORECASE)
