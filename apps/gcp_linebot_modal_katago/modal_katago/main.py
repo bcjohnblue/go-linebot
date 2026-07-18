@@ -373,7 +373,7 @@ async def _notify_callback(callback_url: str, payload: Dict[str, Any]):
 def evaluation(
     sgf_gcs_path: str,
     current_turn: int,
-    visits: int = 1000,
+    visits: int = 5000,
 ) -> Dict[str, Any]:
     """
     Execute KataGo evaluation analysis on current board position.
@@ -581,7 +581,7 @@ def get_ai_next_move(
     callback_url: str,
     target_id: str,
     current_turn: int,
-    visits: int = 1000,
+    visits: int = 5000,
     reply_token: Optional[str] = None,
     user_board_image_url: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -593,7 +593,7 @@ def get_ai_next_move(
         callback_url: URL to callback when analysis completes
         target_id: LINE target ID (user/group/room)
         current_turn: Current turn (1=black, 2=white)
-        visits: Number of visits for KataGo (default: 400)
+        visits: Number of visits for KataGo (default: 5000)
         reply_token: Reply token from user's move (if available)
         user_board_image_url: User's board image URL (if available)
 
