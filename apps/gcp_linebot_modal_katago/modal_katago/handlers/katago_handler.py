@@ -601,7 +601,18 @@ async def run_katago_gtp_next_move(
         # Clear board
         gtp_commands.append("boardsize 19\n")
         gtp_commands.append("clear_board\n")
-        
+
+        # Set komi from SGF KM property (fallback to 7.5) so KataGo
+        # evaluates with the game's actual komi (e.g. 0.5 for handicap games)
+        komi = 7.5
+        try:
+            root = sgf_game.get_root()
+            if root.has_property("KM"):
+                komi = float(root.get("KM"))
+        except (TypeError, ValueError) as komi_error:
+            logger.warning(f"Invalid KM property in SGF, using default komi 7.5: {komi_error}")
+        gtp_commands.append(f"komi {komi}\n")
+
         # Play all moves from SGF
         for node in sequence:
             color_move, move = node.get_move()

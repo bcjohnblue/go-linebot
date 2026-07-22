@@ -446,6 +446,8 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 • 投子 - 認輸並結束本局（會先顯示勝負，再重置棋盤）
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
+• 貼目 - 查看目前貼目設定（預設黑貼白 7.5 目）
+• 貼目 7.5 / komi 0.5 - 設定黑貼白的目數（讓子棋建議設 0.5），套用於形勢判斷、覆盤與 AI 對弈
 
 🔐 認證功能：
 • auth <token> / 認證 <token> - 進行認證以使用 AI 對弈、覆盤與形勢判斷功能
@@ -636,6 +638,28 @@ async def handle_review_command(target_id: str, reply_token: Optional[str]):
             return latest_blob.name
 
         latest_sgf_path = await asyncio.to_thread(get_latest_sgf)
+
+        # If the uploaded SGF has no KM (komi) property, inject the user's komi
+        # setting so KataGo analyzes with the correct komi.
+        # SGFs that already specify KM are left untouched (the file wins).
+        try:
+            from services.storage import download_file, upload_buffer
+
+            review_sgf_bytes = await download_file(latest_sgf_path)
+            review_sgf = sgf.Sgf_game.from_bytes(review_sgf_bytes)
+            if not review_sgf.get_root().has_property("KM"):
+                user_komi = await get_target_komi(target_id)
+                set_sgf_komi(review_sgf, user_komi)
+                await upload_buffer(
+                    review_sgf.serialise(),
+                    latest_sgf_path,
+                    content_type="application/x-go-sgf",
+                )
+                logger.info(
+                    f"Injected komi {user_komi} into review SGF without KM: {latest_sgf_path}"
+                )
+        except Exception as komi_error:
+            logger.warning(f"Failed to ensure komi in review SGF: {komi_error}")
 
         # Ensure it's a GCS path
         if not latest_sgf_path.startswith("gs://"):
@@ -1051,6 +1075,128 @@ async def handle_evaluation_command(target_id: str, reply_token: Optional[str]):
         )
 
 
+DEFAULT_KOMI = 7.5
+
+
+def get_sgf_komi(sgf_game: sgf.Sgf_game) -> float:
+    """Read komi (KM property) from SGF root, falling back to DEFAULT_KOMI"""
+    try:
+        root = sgf_game.get_root()
+        if root.has_property("KM"):
+            return float(root.get("KM"))
+    except (TypeError, ValueError) as error:
+        logger.warning(f"Failed to read komi from SGF: {error}")
+    return DEFAULT_KOMI
+
+
+def set_sgf_komi(sgf_game: sgf.Sgf_game, komi: float) -> None:
+    """Write komi (KM property) into SGF root"""
+    sgf_game.get_root().set("KM", komi)
+
+
+async def get_target_komi(target_id: str) -> float:
+    """Get user's komi setting from GCS state metadata, falling back to DEFAULT_KOMI"""
+    state_meta = await load_state_from_gcs(target_id)
+    if state_meta and "komi" in state_meta:
+        try:
+            return float(state_meta["komi"])
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_KOMI
+
+
+async def handle_komi_command(
+    target_id: str, reply_token: Optional[str], komi_text: Optional[str]
+):
+    """Handle 貼目 command: set or show komi
+
+    Komi is stored in the current game SGF (KM property) and in state metadata,
+    so 形勢判斷 / 覆盤 / AI 對弈 all use the same value. The setting persists
+    across new games until changed.
+    """
+    try:
+        state = await get_game_state(target_id)
+        sgf_game = state["sgf_game"]
+
+        # Query only: show current komi
+        if not komi_text:
+            current_komi = get_sgf_komi(sgf_game)
+            await send_message(
+                target_id,
+                reply_token,
+                [
+                    TextMessage(
+                        text=(
+                            f"目前貼目：黑貼白 {current_komi:g} 目\n\n"
+                            "輸入「貼目 7.5」可修改，讓子棋建議設定「貼目 0.5」。"
+                        )
+                    )
+                ],
+            )
+            return
+
+        try:
+            komi = float(komi_text)
+        except ValueError:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 貼目格式錯誤，請輸入數字，例如「貼目 7.5」或「貼目 0.5」。")],
+            )
+            return
+
+        # KataGo accepts integer or half-integer komi within [-150, 150]
+        if komi * 2 != int(komi * 2) or abs(komi) > 150:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 貼目必須是 0.5 的倍數（例如 0.5、6.5、7.5），且介於 -150 到 150 之間。")],
+            )
+            return
+
+        # Save setting to state metadata first (survives 重置, used by new games
+        # and as fallback for reviewing SGFs without KM)
+        state_meta = await load_state_from_gcs(target_id)
+        if state_meta is None:
+            state_meta = {}
+        state_meta["komi"] = komi
+        await save_state_to_gcs(target_id, state_meta)
+
+        # Apply to current game SGF and persist to GCS
+        set_sgf_komi(sgf_game, komi)
+        sgf_path = await save_game_sgf(target_id, state)
+        if not sgf_path:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法儲存貼目設定，請稍後再試。")],
+            )
+            return
+
+        komi_desc = f"黑貼白 {komi:g} 目" if komi >= 0 else f"白貼黑 {-komi:g} 目"
+        await send_message(
+            target_id,
+            reply_token,
+            [
+                TextMessage(
+                    text=(
+                        f"✅ 已設定貼目：{komi_desc}\n\n"
+                        "此貼目將套用於形勢判斷、覆盤與 AI 對弈，"
+                        "並持續套用到之後的新對局，直到再次修改。\n"
+                        "（覆盤時若上傳的棋譜已標註貼目，則以棋譜為準）"
+                    )
+                )
+            ],
+        )
+    except Exception as error:
+        logger.error(f"Error in 貼目 command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 設定貼目時發生錯誤：{str(error)}")],
+        )
+
+
 async def get_game_id(target_id: str) -> str:
     """Get or create game ID for a target (user/group/room)
     Game ID is a unique identifier for each game session.
@@ -1165,12 +1311,21 @@ async def get_game_state(target_id: str) -> Dict[str, Any]:
 
     # Create new game
     game_id = await get_game_id(target_id)
+    new_sgf_game = sgf.Sgf_game(size=19)
+    # Apply user's komi setting (from state metadata) to the new game
+    new_komi = DEFAULT_KOMI
+    if state_meta and "komi" in state_meta:
+        try:
+            new_komi = float(state_meta["komi"])
+        except (TypeError, ValueError):
+            pass
+    set_sgf_komi(new_sgf_game, new_komi)
     new_state = {
         "game": GoBoard(),
         "current_turn": 1,  # 1=黑, 2=白
-        "sgf_game": sgf.Sgf_game(size=19),
+        "sgf_game": new_sgf_game,
     }
-    logger.info(f"Created new game state for {target_id}")
+    logger.info(f"Created new game state for {target_id} (komi={new_komi})")
     return new_state
 
 
@@ -1528,8 +1683,15 @@ async def reset_game_state(target_id: str, reply_token: Optional[str] = None):
     existing_state["current_turn"] = 1
     await save_state_to_gcs(target_id, existing_state)
 
-    # Save empty SGF to GCS
+    # Save empty SGF to GCS (carry over user's komi setting)
     new_sgf = sgf.Sgf_game(size=19)
+    new_komi = DEFAULT_KOMI
+    if "komi" in existing_state:
+        try:
+            new_komi = float(existing_state["komi"])
+        except (TypeError, ValueError):
+            pass
+    set_sgf_komi(new_sgf, new_komi)
     from services.storage import upload_buffer
 
     sgf_bytes = new_sgf.serialise()
@@ -2113,10 +2275,12 @@ async def handle_undo_move(
                 logger.warning(
                     f"Failed to restore game from SGF after undo, resetting to empty board"
                 )
+                fallback_sgf = sgf.Sgf_game(size=19)
+                set_sgf_komi(fallback_sgf, get_sgf_komi(sgf_game))
                 state = {
                     "game": GoBoard(),
                     "current_turn": 1,
-                    "sgf_game": sgf.Sgf_game(size=19),
+                    "sgf_game": fallback_sgf,
                 }
 
             # Save updated SGF to GCS after restoring state
@@ -2473,6 +2637,11 @@ async def handle_text_message(event: Dict[str, Any]):
 
     if text == "形勢" or text == "形式" or text.lower() == "evaluation":
         await handle_evaluation_command(target_id, reply_token)
+        return
+
+    komi_match = re.match(r"^(?:貼目|komi)(?:\s+(-?\d+(?:\.\d+)?))?$", text, re.IGNORECASE)
+    if komi_match:
+        await handle_komi_command(target_id, reply_token, komi_match.group(1))
         return
 
     # Handle Guess First
