@@ -604,34 +604,38 @@ async def run_katago_gtp_next_move(
 
         # Set komi from SGF KM property (fallback to 7.5) so KataGo
         # evaluates with the game's actual komi (e.g. 0.5 for handicap games)
+        root = sgf_game.get_root()
         komi = 7.5
         try:
-            root = sgf_game.get_root()
             if root.has_property("KM"):
                 komi = float(root.get("KM"))
         except (TypeError, ValueError) as komi_error:
             logger.warning(f"Invalid KM property in SGF, using default komi 7.5: {komi_error}")
         gtp_commands.append(f"komi {komi}\n")
 
+        def sgf_to_gtp(sgf_row: int, sgf_col: int) -> str:
+            # SGF: (row, col) where row 0 is bottom (same as GTP)
+            # GTP: "A1" to "T19" (skips 'I'), row 1 is bottom
+            gtp_col = chr(ord('A') + sgf_col)
+            if gtp_col >= 'I':
+                gtp_col = chr(ord(gtp_col) + 1)  # Skip 'I'
+            return f"{gtp_col}{sgf_row + 1}"
+
+        # Place setup stones (AB/AW, e.g. handicap stones) before replaying moves,
+        # otherwise KataGo would see a board without the handicap stones
+        black_setup, white_setup, _empty_setup = root.get_setup_stones()
+        for sgf_row, sgf_col in sorted(black_setup):
+            gtp_commands.append(f"play B {sgf_to_gtp(sgf_row, sgf_col)}\n")
+        for sgf_row, sgf_col in sorted(white_setup):
+            gtp_commands.append(f"play W {sgf_to_gtp(sgf_row, sgf_col)}\n")
+
         # Play all moves from SGF
         for node in sequence:
             color_move, move = node.get_move()
             if move is not None:
-                # Convert SGF coordinates to GTP format
-                # SGF: (row, col) where row 0 is bottom (same as GTP)
-                # GTP: "A1" to "T19" (skips 'I'), row 1 is bottom
                 sgf_row, sgf_col = move
-                # Convert column: SGF col 0-18 → GTP A-T (skip I)
-                gtp_col = chr(ord('A') + sgf_col)
-                if gtp_col >= 'I':
-                    gtp_col = chr(ord(gtp_col) + 1)  # Skip 'I'
-                # Convert row: SGF row 0-18 (0=bottom) → GTP row 1-19 (1=bottom)
-                # No conversion needed, just add 1: SGF row 0 → GTP row 1
-                gtp_row = str(sgf_row + 1)
-                gtp_move = f"{gtp_col}{gtp_row}"
-                
                 gtp_color = "B" if color_move == "b" else "W"
-                gtp_commands.append(f"play {gtp_color} {gtp_move}\n")
+                gtp_commands.append(f"play {gtp_color} {sgf_to_gtp(sgf_row, sgf_col)}\n")
         
         # Get next move
         gtp_commands.append(f"genmove {color}\n")

@@ -448,6 +448,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
 • 貼目 - 查看目前貼目設定（預設黑貼白 7.5 目）
 • 貼目 7.5 / komi 0.5 - 設定黑貼白的目數（讓子棋建議設 0.5），套用於形勢判斷、覆盤與 AI 對弈
+• 讓子 4 - 空盤時擺 2~9 顆讓子（標準星位），貼目自動設為 0.5，輪白棋先下；AI 對弈模式下 AI 會直接應手
 
 🔐 認證功能：
 • auth <token> / 認證 <token> - 進行認證以使用 AI 對弈、覆盤與形勢判斷功能
@@ -1197,6 +1198,194 @@ async def handle_komi_command(
         )
 
 
+async def spawn_ai_next_move(
+    target_id: str,
+    sgf_path: Optional[str],
+    current_turn: int,
+    reply_token: Optional[str],
+    user_board_image_url: Optional[str],
+) -> bool:
+    """Spawn Modal get_ai_next_move function for VS AI mode (non-blocking).
+
+    Returns True if spawned successfully (the reply will be sent by the
+    callback), False if configuration is missing or spawn failed (caller
+    should fall back to a normal reply).
+    """
+    try:
+        import modal
+
+        modal_app_name = config.get("modal", {}).get("app_name")
+        modal_function_get_ai_next_move = config.get("modal", {}).get("function_get_ai_next_move")
+        callback_get_ai_next_move_url = config.get("cloud_run", {}).get("callback_get_ai_next_move_url")
+
+        if not (modal_app_name and modal_function_get_ai_next_move and callback_get_ai_next_move_url):
+            logger.error("Modal app_name, function_get_ai_next_move, or callback_get_ai_next_move_url not configured")
+            return False
+
+        # Get SGF GCS path (save_game_sgf returns gs:// format)
+        sgf_gcs_path = sgf_path if sgf_path and sgf_path.startswith("gs://") else None
+        if not sgf_gcs_path:
+            logger.error(f"Invalid SGF path: {sgf_path}")
+            return False
+
+        vs_ai_function = modal.Function.from_name(
+            modal_app_name, modal_function_get_ai_next_move
+        )
+        vs_ai_function.spawn(
+            sgf_gcs_path=sgf_gcs_path,
+            callback_url=callback_get_ai_next_move_url,
+            target_id=target_id,
+            current_turn=current_turn,
+            reply_token=reply_token,  # Pass reply_token to callback
+            user_board_image_url=user_board_image_url,  # Pass user's board image URL
+        )
+        logger.info(
+            f"Spawned Modal function for VS AI: target_id={target_id}, current_turn={current_turn}"
+        )
+        return True
+    except Exception as modal_error:
+        logger.error(f"Error calling Modal function for VS AI: {modal_error}", exc_info=True)
+        return False
+
+
+# Standard fixed-handicap star points (Japanese convention):
+# 右上 → 左下 → 右下 → 左上 → sides → center
+HANDICAP_PLACEMENTS = {
+    2: ["Q16", "D4"],
+    3: ["Q16", "D4", "Q4"],
+    4: ["Q16", "D4", "Q4", "D16"],
+    5: ["Q16", "D4", "Q4", "D16", "K10"],
+    6: ["Q16", "D4", "Q4", "D16", "D10", "Q10"],
+    7: ["Q16", "D4", "Q4", "D16", "D10", "Q10", "K10"],
+    8: ["Q16", "D4", "Q4", "D16", "D10", "Q10", "K16", "K4"],
+    9: ["Q16", "D4", "Q4", "D16", "D10", "Q10", "K16", "K4", "K10"],
+}
+
+GTP_COLUMNS = "ABCDEFGHJKLMNOPQRST"  # GTP columns skip 'I'
+
+
+def gtp_point_to_sgf_coords(point: str):
+    """Convert GTP point (e.g. 'Q16') to sgfmill (row, col), row 0 = bottom"""
+    col = GTP_COLUMNS.index(point[0].upper())
+    row = int(point[1:]) - 1
+    return (row, col)
+
+
+async def handle_handicap_command(
+    target_id: str, reply_token: Optional[str], n_text: str
+):
+    """Handle 讓子 command: set up an N-stone handicap game on standard star points
+
+    Writes standard handicap SGF (HA + AB setup stones + PL[W]) and sets komi
+    to 0.5. White moves first; if VS AI mode is on, the AI plays white's first
+    move immediately, otherwise it waits for a human white move.
+    """
+    import tempfile
+    from services.storage import upload_file, get_public_url
+
+    try:
+        try:
+            n = int(n_text)
+        except ValueError:
+            n = 0
+        if n < 2 or n > 9:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 讓子數必須介於 2 到 9 之間，例如「讓子 4」。")],
+            )
+            return
+
+        state = await get_game_state(target_id)
+        game = state["game"]
+
+        # Require an empty board to avoid mixing handicap setup into a game in progress
+        has_stone = any(stone != 0 for row in game.board for stone in row)
+        has_moves = any(
+            node.get_move()[1] is not None or node.get_move()[0] is not None
+            for node in state["sgf_game"].get_main_sequence()
+        )
+        if has_stone or has_moves:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 目前已有對局進行中，請先輸入「重置」再設定讓子。")],
+            )
+            return
+
+        sgf_game = state["sgf_game"]
+        root = sgf_game.get_root()
+
+        # Place handicap stones on standard star points
+        setup_points = set()
+        for point in HANDICAP_PLACEMENTS[n]:
+            sgf_row, sgf_col = gtp_point_to_sgf_coords(point)
+            setup_points.add((sgf_row, sgf_col))
+            game.board[18 - sgf_row][sgf_col] = 1  # Black stone (display board, row 0 = top)
+
+        # Standard handicap SGF: HA + AB setup stones, white to move, komi 0.5
+        root.set("HA", n)
+        root.set_setup_stones(setup_points, set())
+        root.set("PL", "w")
+        set_sgf_komi(sgf_game, 0.5)
+
+        state["current_turn"] = 2  # White moves first in a handicap game
+        sgf_path = await save_game_sgf(target_id, state)
+        if not sgf_path:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法儲存讓子設定，請稍後再試。")],
+            )
+            return
+
+        # Draw the board with handicap stones and upload to GCS
+        game_id = await get_game_id(target_id)
+        timestamp = int(time.time())
+        filename = f"board_{timestamp}.png"
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+        visualizer.draw_board(game.board, last_move=None, output_filename=tmp_path)
+        remote_path = f"target_{target_id}/boards/{game_id}/{filename}"
+        await upload_file(tmp_path, remote_path)
+        image_url = get_public_url(remote_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+        # If VS AI mode is on, let the AI play white's first move immediately
+        if await is_vs_ai_mode(target_id):
+            spawned = await spawn_ai_next_move(
+                target_id, sgf_path, 2, reply_token, image_url
+            )
+            if spawned:
+                # Reply will be sent by the AI callback (handicap board + AI's move)
+                return
+
+        # Human vs human (or AI spawn failed): reply with the handicap board
+        info_text = (
+            f"✅ 已設定讓子 {n} 子（標準星位），貼目自動設為 0.5 目。\n"
+            "現在輪到：白棋 ⚪"
+        )
+        messages = [TextMessage(text=info_text)]
+        if is_valid_https_url(image_url):
+            messages.append(
+                ImageMessage(
+                    original_content_url=image_url,
+                    preview_image_url=image_url,
+                )
+            )
+        await send_message(target_id, reply_token, messages)
+    except Exception as error:
+        logger.error(f"Error in 讓子 command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 設定讓子時發生錯誤：{str(error)}")],
+        )
+
+
 async def get_game_id(target_id: str) -> str:
     """Get or create game ID for a target (user/group/room)
     Game ID is a unique identifier for each game session.
@@ -1358,7 +1547,13 @@ def create_sgf_with_first_n_moves(sgf_game: sgf.Sgf_game, n_moves: int) -> sgf.S
                     new_root.set(prop, values[0] if len(values) == 1 else values)
                 else:
                     new_root.set(prop, values)
-    
+
+    # Copy setup stones (AB/AW/AE, e.g. handicap stones) so they survive
+    # undo / partial-load operations
+    black_setup, white_setup, empty_setup = root.get_setup_stones()
+    if black_setup or white_setup or empty_setup:
+        new_root.set_setup_stones(black_setup, white_setup, empty_setup)
+
     # Get main sequence and take first N moves
     sequence = sgf_game.get_main_sequence()
     move_count = 0
@@ -1785,50 +1980,22 @@ async def handle_board_move(
 
         # Check if VS AI mode is enabled
         vs_ai_mode = await is_vs_ai_mode(target_id)
-        
+
         if is_valid_https_url(image_url):
             # If VS AI mode is enabled, don't reply immediately, wait for AI's move
             if vs_ai_mode:
-                # Call Modal function asynchronously (non-blocking)
-                # Pass reply_token and user's board image URL so callback can send everything together
-                try:
-                    import modal
-                    modal_app_name = config.get("modal", {}).get("app_name")
-                    modal_function_get_ai_next_move = config.get("modal", {}).get("function_get_ai_next_move")
-                    callback_get_ai_next_move_url = config.get("cloud_run", {}).get("callback_get_ai_next_move_url")
-                    
-                    if modal_app_name and modal_function_get_ai_next_move and callback_get_ai_next_move_url:
-                        # Get SGF GCS path (save_game_sgf returns gs:// format)
-                        sgf_gcs_path = sgf_path if sgf_path and sgf_path.startswith("gs://") else None
-                        
-                        if not sgf_gcs_path:
-                            logger.error(f"Invalid SGF path: {sgf_path}")
-                        else:
-                            # Get current turn (after user's move, it's AI's turn)
-                            ai_current_turn = state["current_turn"]
-                        
-                            # Spawn Modal function asynchronously
-                            # Pass reply_token and user_board_image_url to callback
-                            vs_ai_function = modal.Function.from_name(
-                                modal_app_name, modal_function_get_ai_next_move
-                            )
-                            vs_ai_function.spawn(
-                                sgf_gcs_path=sgf_gcs_path,
-                                callback_url=callback_get_ai_next_move_url,
-                                target_id=target_id,
-                                current_turn=ai_current_turn,
-                                reply_token=reply_token,  # Pass reply_token to callback
-                                user_board_image_url=image_url,  # Pass user's board image URL
-                            )
-                            logger.info(f"Spawned Modal function for VS AI: target_id={target_id}, current_turn={ai_current_turn}")
-                            # Don't send reply here, wait for AI callback to respond
-                            return
-                    else:
-                        logger.error("Modal app_name, function_get_ai_next_move, or callback_get_ai_next_move_url not configured")
-                except Exception as modal_error:
-                    logger.error(f"Error calling Modal function for VS AI: {modal_error}", exc_info=True)
-                    # If error, fall through to send user's move image
-            
+                spawned = await spawn_ai_next_move(
+                    target_id,
+                    sgf_path,
+                    state["current_turn"],
+                    reply_token,
+                    image_url,
+                )
+                if spawned:
+                    # Don't send reply here, wait for AI callback to respond
+                    return
+                # If spawn failed, fall through to send user's move image
+
             # Send board image (non-VS AI mode, or error in VS AI mode)
             messages = [
                 ImageMessage(
@@ -2642,6 +2809,11 @@ async def handle_text_message(event: Dict[str, Any]):
     komi_match = re.match(r"^(?:貼目|komi)(?:\s+(-?\d+(?:\.\d+)?))?$", text, re.IGNORECASE)
     if komi_match:
         await handle_komi_command(target_id, reply_token, komi_match.group(1))
+        return
+
+    handicap_match = re.match(r"^(?:讓子|handicap)\s+(\d+)$", text, re.IGNORECASE)
+    if handicap_match:
+        await handle_handicap_command(target_id, reply_token, handicap_match.group(1))
         return
 
     # Handle Guess First
