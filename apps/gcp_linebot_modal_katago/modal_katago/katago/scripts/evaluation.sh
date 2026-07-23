@@ -106,6 +106,7 @@ echo ""
 echo "{\"sgfFile\": \"$SGF_FILE_ABS\", \"analyzeLastTurn\": true, \"includeOwnership\": true}" | \
  "$VENV_PY" "$KATAWRAP_PY" \
   -only-last \
+  -rules japanese \
   -visits "$VISITS" \
   "$KATAGO_BIN" analysis \
   -config "$KATAGO_CONFIG" \

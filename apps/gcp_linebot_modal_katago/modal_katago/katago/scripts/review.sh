@@ -111,6 +111,7 @@ echo ""
 
 echo "{\"sgfFile\": \"$SGF_FILE_ABS\"}" | \
  "$VENV_PY" "$KATAWRAP_PY" \
+  -rules japanese \
   -visits "$VISITS" \
   "$KATAGO_BIN" analysis \
   -config "$KATAGO_CONFIG" \

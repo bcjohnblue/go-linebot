@@ -446,6 +446,7 @@ HELP_MESSAGE = """歡迎使用圍棋 Line Bot！
 • 重置 / reset - 重置棋盤，開始新遊戲（會保存當前棋譜）
 • 投子 - 認輸並結束本局（會先顯示勝負，再重置棋盤）
 • 形勢 / 形式 / evaluation - 顯示當前盤面領地分布與目數差距
+• 終局 / 數棋 / score - 數棋判定最終勝負並寫入棋譜；終局後輸入「悔棋」可撤銷結果繼續下
 • 貼目 - 查看目前貼目設定（預設黑貼白 7.5 目）
 • 貼目 7.5 / komi 0.5 - 設定黑貼白的目數（讓子棋建議設 0.5），套用於形勢判斷、覆盤與 AI 對弈
 • 讓子 4 - 空盤時擺 2~9 顆讓子（標準星位），貼目自動設為 0.5，輪白棋先下；AI 對弈模式下 AI 會直接應手
@@ -1076,6 +1077,228 @@ async def handle_evaluation_command(target_id: str, reply_token: Optional[str]):
         )
 
 
+# 終局數棋時，ownership 絕對值低於此值的交叉點視為「歸屬未定」
+FINAL_SCORE_UNCERTAIN_THRESHOLD = 0.4
+# 歸屬未定的點超過此數量時，只給參考估計、不寫入正式結果
+FINAL_SCORE_UNCERTAIN_LIMIT = 10
+
+
+async def handle_final_score_command(target_id: str, reply_token: Optional[str]):
+    """Handle final scoring command (終局 / 數棋 / score)
+
+    Runs the same KataGo evaluation as 形勢判斷, but announces a definitive
+    result: snaps scoreLead to a legal margin for the current komi, writes it
+    into the SGF RE property, and locks the game until 悔棋 reopens it.
+    """
+    import modal
+    import tempfile
+    from pathlib import Path
+
+    try:
+        # Check authentication only if AUTH_TOKEN is configured
+        auth_token = config.get("auth", {}).get("token")
+        if auth_token:
+            from services.storage import check_auth
+
+            is_authenticated = await check_auth(target_id, auth_token)
+            if not is_authenticated:
+                await send_message(
+                    target_id,
+                    reply_token,
+                    [TextMessage(text="❌ 請先使用 'auth <token>' 指令進行認證，才可使用終局數棋功能")],
+                )
+                return
+
+        state = await get_game_state(target_id)
+        game = state["game"]
+        current_turn = state.get("current_turn", 1)
+        sgf_game = state["sgf_game"]
+
+        existing_result = get_sgf_result(sgf_game)
+        if existing_result:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"🏁 本局已終局（{existing_result}）。\n輸入「悔棋」可撤銷終局結果繼續下，或輸入「重置」開新局。")],
+            )
+            return
+
+        has_stone = any(stone != 0 for row in game.board for stone in row)
+        if not has_stone:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="目前盤面沒有進行中的對局，無法終局數棋。")],
+            )
+            return
+
+        sgf_gcs_path = await save_game_sgf(target_id, state)
+        if not sgf_gcs_path:
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 無法儲存目前棋局 SGF，請稍後再試。")],
+            )
+            return
+
+        modal_app_name = config.get("modal", {}).get("app_name")
+        modal_function_evaluation = config.get("modal", {}).get("function_evaluation", "evaluation")
+
+        if not modal_app_name:
+            logger.error("MODAL_APP_NAME not configured")
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 系統配置錯誤：未設定 Modal 應用程式名稱")],
+            )
+            return
+
+        logger.info(f"Calling Modal function for final score: {modal_app_name}.{modal_function_evaluation}")
+        try:
+            evaluation_function = modal.Function.from_name(
+                modal_app_name, modal_function_evaluation
+            )
+            result = evaluation_function.remote(
+                sgf_gcs_path=sgf_gcs_path,
+                current_turn=current_turn,
+            )
+        except Exception as modal_error:
+            logger.error(f"Error calling Modal function: {modal_error}", exc_info=True)
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"❌ 調用 Modal 函數時發生錯誤：{str(modal_error)}")],
+            )
+            return
+
+        if not result.get("success"):
+            error = result.get("error", "Unknown error")
+            logger.error(f"KataGo final score evaluation failed: {error}")
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text=f"❌ 終局數棋失敗：{error}")],
+            )
+            return
+
+        territory = result.get("territory")
+        score_lead = result.get("scoreLead")
+        ownership = result.get("ownership_raw") or []
+
+        try:
+            score = float(score_lead)
+        except (TypeError, ValueError):
+            await send_message(
+                target_id,
+                reply_token,
+                [TextMessage(text="❌ 目前無法可靠判定勝負，請稍後再試。")],
+            )
+            return
+
+        komi = get_sgf_komi(sgf_game)
+
+        # 歸屬未定的交叉點數（官子未收完或死活未定時會偏多）
+        uncertain_points = sum(
+            1
+            for row in ownership
+            for v in row
+            if abs(v) < FINAL_SCORE_UNCERTAIN_THRESHOLD
+        )
+
+        # 合法目差只會是「整數 + 貼目的小數部分」（貼 0.5 → ±0.5、±1.5…），
+        # 把 scoreLead 期望值吸附到最近的合法目差
+        frac = abs(komi) % 1
+        margin = round(abs(score) - frac) + frac
+        if margin < 0:
+            margin = frac
+        winner_is_black = score >= 0
+
+        if margin == 0:
+            verdict_text = "和棋（雙方目數相同）"
+            re_value = "0"
+        else:
+            winner = "黑" if winner_is_black else "白"
+            verdict_text = f"{winner}中 {margin:g} 目勝"
+            re_value = f"{'B' if winner_is_black else 'W'}+{margin:g}"
+
+        if uncertain_points <= FINAL_SCORE_UNCERTAIN_LIMIT:
+            # 寫入正式結果並鎖定棋局（落子/虛手會被擋下，悔棋可重新開放）
+            sgf_game.get_root().set("RE", re_value)
+            await save_game_sgf(target_id, state)
+            result_text = (
+                f"🏁 終局結果：{verdict_text}（貼目 {komi:g}）\n"
+                f"結果已寫入棋譜（RE[{re_value}]）。\n"
+                "若想繼續下，輸入「悔棋」即可撤銷終局；或輸入「重置」開新局。"
+            )
+        else:
+            result_text = (
+                f"⚠️ 盤面還有 {uncertain_points} 處歸屬未定，可能尚未收完官子或死活未定。\n"
+                f"目前估計：{verdict_text}（僅供參考，未記錄勝負）\n"
+                "建議收完官子、填完單官後再輸入「終局」。"
+            )
+
+        # 從 SGF 找最後一手座標，保持 last move 高亮
+        last_coords = None
+        sequence = sgf_game.get_main_sequence()
+        for node in sequence:
+            color, move = node.get_move()
+            if move is not None:
+                sgf_r, sgf_c = move
+                last_coords = (18 - sgf_r, sgf_c)
+
+        # Draw board with territory overlay
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            filename = f"final_{int(time.time())}.png"
+            output_path = temp_path / filename
+
+            visualizer.draw_board(
+                game.board,
+                last_move=last_coords,
+                output_filename=str(output_path),
+                territory=territory,
+            )
+
+            from services.storage import upload_buffer, get_public_url
+
+            game_id = await get_game_id(target_id)
+            remote_path = f"target_{target_id}/boards/{game_id}/{filename}"
+            with open(output_path, "rb") as f:
+                image_bytes = f.read()
+            await upload_buffer(
+                image_bytes,
+                remote_path,
+                content_type="image/png",
+                cache_control="no-cache, max-age=0",
+            )
+            image_url = get_public_url(remote_path)
+            if is_valid_https_url(image_url):
+                messages = [
+                    TextMessage(text=result_text),
+                    ImageMessage(
+                        original_content_url=image_url,
+                        preview_image_url=image_url,
+                    ),
+                ]
+                await send_message(target_id, reply_token, messages)
+                return
+            logger.warning(f"Invalid image URL: {image_url}")
+
+        # Fallback: text only
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=result_text + "\n\n⚠️ 無法顯示棋盤圖片，請檢查 GCS 或 public URL 設定。")],
+        )
+    except Exception as error:
+        logger.error(f"Error in 終局 command: {error}", exc_info=True)
+        await send_message(
+            target_id,
+            reply_token,
+            [TextMessage(text=f"❌ 執行終局數棋時發生錯誤：{str(error)}")],
+        )
+
+
 DEFAULT_KOMI = 7.5
 
 
@@ -1093,6 +1316,26 @@ def get_sgf_komi(sgf_game: sgf.Sgf_game) -> float:
 def set_sgf_komi(sgf_game: sgf.Sgf_game, komi: float) -> None:
     """Write komi (KM property) into SGF root"""
     sgf_game.get_root().set("KM", komi)
+
+
+def get_sgf_result(sgf_game: sgf.Sgf_game) -> Optional[str]:
+    """Read result (RE property) from SGF root; None means the game is still open"""
+    root = sgf_game.get_root()
+    try:
+        if root.has_property("RE"):
+            return root.get("RE")
+    except ValueError as error:
+        logger.warning(f"Failed to read RE from SGF: {error}")
+    return None
+
+
+def clear_sgf_result(sgf_game: sgf.Sgf_game) -> bool:
+    """Remove result (RE property) from SGF root; returns True if a result was cleared"""
+    root = sgf_game.get_root()
+    if root.has_property("RE"):
+        root.unset("RE")
+        return True
+    return False
 
 
 async def get_target_komi(target_id: str) -> float:
@@ -1913,6 +2156,23 @@ async def handle_board_move(
         current_turn = state["current_turn"]
         sgf_game = state["sgf_game"]
 
+        # A finished game (RE written by 終局) rejects new moves until 悔棋 reopens it
+        existing_result = get_sgf_result(sgf_game)
+        if existing_result:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=(
+                            f"🏁 本局已終局（{existing_result}），無法繼續落子。\n"
+                            "輸入「悔棋」可撤銷終局結果繼續下，或輸入「重置」開新局。"
+                        )
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
+
         # Place stone
         success, msg = game.place_stone(coord_text, current_turn)
 
@@ -2037,6 +2297,23 @@ async def handle_pass_move(target_id: str, reply_token: Optional[str]):
         game = state["game"]
         current_turn = state["current_turn"]
         sgf_game = state["sgf_game"]
+
+        # A finished game (RE written by 終局) rejects passes until 悔棋 reopens it
+        existing_result = get_sgf_result(sgf_game)
+        if existing_result:
+            request = ReplyMessageRequest(
+                reply_token=reply_token,
+                messages=[
+                    TextMessage(
+                        text=(
+                            f"🏁 本局已終局（{existing_result}），無法虛手。\n"
+                            "輸入「悔棋」可撤銷終局結果繼續下，或輸入「重置」開新局。"
+                        )
+                    )
+                ],
+            )
+            await asyncio.to_thread(line_bot_api.reply_message, request)
+            return
 
         # --- 1. Update SGF record (move=None means pass) ---
         node = sgf_game.get_last_node()
@@ -2433,6 +2710,9 @@ async def handle_undo_move(
                 await asyncio.to_thread(line_bot_api.reply_message, request)
                 return
 
+            # Undoing reopens a finished game: drop the recorded result (RE)
+            reopened = clear_sgf_result(sgf_game)
+
             # Restore game state directly from updated SGF object
             restored = restore_game_from_sgf_object(sgf_game)
             if restored:
@@ -2509,6 +2789,8 @@ async def handle_undo_move(
             )
             if actual_undo_steps < undo_steps:
                 undo_text += f"\n（要求 {undo_steps} 手，實際 {actual_undo_steps} 手）"
+            if reopened:
+                undo_text += "\n已撤銷終局結果，棋局重新開放。"
 
             if is_valid_https_url(image_url):
                 request = ReplyMessageRequest(
@@ -2804,6 +3086,10 @@ async def handle_text_message(event: Dict[str, Any]):
 
     if text == "形勢" or text == "形式" or text.lower() == "evaluation":
         await handle_evaluation_command(target_id, reply_token)
+        return
+
+    if text == "終局" or text == "數棋" or text.lower() == "score":
+        await handle_final_score_command(target_id, reply_token)
         return
 
     komi_match = re.match(r"^(?:貼目|komi)(?:\s+(-?\d+(?:\.\d+)?))?$", text, re.IGNORECASE)

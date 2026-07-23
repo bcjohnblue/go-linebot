@@ -613,6 +613,11 @@ async def run_katago_gtp_next_move(
             logger.warning(f"Invalid KM property in SGF, using default komi 7.5: {komi_error}")
         gtp_commands.append(f"komi {komi}\n")
 
+        # Japanese (territory) rules to match evaluation/review and human
+        # counting habits; under area rules KataGo fills its own territory
+        # at the end, which loses points when the game is counted by territory
+        gtp_commands.append("kata-set-rules japanese\n")
+
         def sgf_to_gtp(sgf_row: int, sgf_col: int) -> str:
             # SGF: (row, col) where row 0 is bottom (same as GTP)
             # GTP: "A1" to "T19" (skips 'I'), row 1 is bottom

@@ -14,7 +14,8 @@ if ! command -v gcloud &> /dev/null; then
     exit 1
 fi
 
-PROJECT_ID=${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}
+# 此專案固定部署在 go-line-bot，不吃 gcloud 全域預設專案（避免誤推到其他專案）
+PROJECT_ID=${GCP_PROJECT_ID:-"go-line-bot"}
 SERVICE_NAME=${CLOUD_RUN_SERVICE_NAME:-"go-linebot-webhook"}
 REGION=${GCP_REGION:-"asia-east1"}
 REPOSITORY=${ARTIFACT_REGISTRY_REPO:-"go-linebot-repo"}
