@@ -539,6 +539,33 @@ async def send_message(
     return False  # Used pushMessage
 
 
+# LINE 一次 push request 最多可帶 5 個 message 物件，且只計 1 則額度
+LINE_MAX_MESSAGES_PER_PUSH = 5
+
+
+async def send_messages_batched(target_id: str, messages: List[Any]) -> int:
+    """Push messages in chunks of LINE_MAX_MESSAGES_PER_PUSH to save quota
+    (each chunk is billed as one push regardless of message count).
+    Stops early on 429 (monthly quota exhausted). Returns chunks sent."""
+    sent_chunks = 0
+    for i in range(0, len(messages), LINE_MAX_MESSAGES_PER_PUSH):
+        chunk = messages[i : i + LINE_MAX_MESSAGES_PER_PUSH]
+        try:
+            await send_message(target_id, None, chunk)
+        except ApiException as e:
+            if e.status == 429:
+                logger.error(
+                    f"LINE monthly push quota exhausted; dropped remaining "
+                    f"{len(messages) - i} messages for {target_id}"
+                )
+                break
+            raise
+        sent_chunks += 1
+        if i + LINE_MAX_MESSAGES_PER_PUSH < len(messages):
+            await asyncio.sleep(0.5)  # 避免發送太快
+    return sent_chunks
+
+
 async def handle_auth_command(target_id: str, reply_token: Optional[str], token: str):
     """Handle auth command - Verify token and save to auth bucket"""
     try:

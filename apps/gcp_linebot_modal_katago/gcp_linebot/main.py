@@ -15,7 +15,6 @@ from handlers.sgf_handler import (
 )
 from handlers.draw_handler import draw_all_moves_gif
 from LLM.providers.openai_provider import call_openai
-import asyncio
 import json
 
 
@@ -95,28 +94,17 @@ async def process_review_results(
     """Process review results in background: LLM analysis + GIF generation"""
     try:
         # Import here to avoid circular imports
-        from handlers.line_handler import send_message, get_review_selection_metric
+        from handlers.line_handler import (
+            send_message,
+            send_messages_batched,
+            get_review_selection_metric,
+        )
         from linebot.v3.messaging.models import TextMessage, ImageMessage
 
         selection_metric = await get_review_selection_metric(target_id)
         metric_text = "勝率落差" if selection_metric == "winrate" else "目差損失"
 
-        # 通知用户覆盤完成，准备进行 LLM 分析
-        await send_message(
-            target_id,
-            None,
-            [
-                TextMessage(
-                    text=f"""✅ KataGo 全盤覆盤完成！
-
-📊 覆盤結果：
-• 總手數：{len(move_stats.get('moves', []))}
-• 關鍵手數挑選依據：{metric_text}
-
-🤖 接續使用 ChatGPT 分析 20 筆關鍵手數並生成評論，大約需要 1 分鐘...，請稍後再回來查看評論結果。"""
-                )
-            ],
-        )
+        # 不另外推播「分析中」進度通知，省一次 push 額度（LINE 按 push 次數×人數計費）
 
         logger.info(
             f"Review selection metric for {target_id}: {selection_metric} ({metric_text})"
@@ -234,35 +222,31 @@ async def process_review_results(
             from services.storage import get_public_url
             from handlers.line_handler import is_valid_https_url, encode_url_path
 
-            messages = []
-            
+            # 收集所有要發送的訊息，最後合併分批 push（每 5 個 message 只計 1 則額度）
+            outgoing_messages = []
+
             # Add global board if available
             if gcs_global_board_path:
                 global_board_url = get_public_url(gcs_global_board_path)
                 if is_valid_https_url(global_board_url):
-                    messages.extend([
-                        TextMessage(text="🗺️ 全盤手順圖："),
+                    # 不加標題文字，讓結果壓在一次 push（5 個 message 物件）內
+                    outgoing_messages.append(
                         ImageMessage(
                             original_content_url=global_board_url,
                             preview_image_url=global_board_url,
-                        ),
-                    ])
-            
+                        )
+                    )
+
             # Add winrate chart if available
             if gcs_winrate_chart_path:
                 winrate_chart_url = get_public_url(gcs_winrate_chart_path)
                 if is_valid_https_url(winrate_chart_url):
-                    messages.extend([
-                        TextMessage(text="📈 勝率變化圖："),
+                    outgoing_messages.append(
                         ImageMessage(
                             original_content_url=winrate_chart_url,
                             preview_image_url=winrate_chart_url,
-                        ),
-                    ])
-            
-            # Send all messages in one call if any available
-            if messages:
-                await send_message(target_id, None, messages)
+                        )
+                    )
 
             # 创建评论映射（手数 -> LLM 生成的评论）
             comment_map = {item["move"]: item["comment"] for item in llm_comments}
@@ -356,31 +340,25 @@ async def process_review_results(
                             alt_text=carousel_message["altText"],
                             contents=flex_container,
                         )
-                        await send_message(target_id, None, [flex_message])
-                        logger.info(f"Sent Carousel (moves {start_index}-{end_index})")
-
-                        # 避免发送太快，批次之间等待 1 秒
-                        if i + MAX_BUBBLES_PER_CAROUSEL < len(all_bubbles):
-                            await asyncio.sleep(1)
+                        outgoing_messages.append(flex_message)
+                        logger.info(f"Prepared Carousel (moves {start_index}-{end_index})")
                     except Exception as carousel_error:
                         logger.error(
-                            f"Error sending Carousel: {carousel_error}", exc_info=True
+                            f"Error preparing Carousel: {carousel_error}", exc_info=True
                         )
 
-            # 发送无法生成 Bubble 的手数的文本消息（后备方案）
+            # 无法生成 Bubble 的手数改用文本消息（后备方案）
             if fallback_messages:
-                logger.info(f"Sending {len(fallback_messages)} fallback text messages")
+                logger.info(f"Adding {len(fallback_messages)} fallback text messages")
                 for fallback in fallback_messages:
-                    try:
-                        await send_message(
-                            target_id, None, [TextMessage(text=fallback["text"])]
-                        )
-                        await asyncio.sleep(0.5)  # 避免发送太快
-                    except Exception as fallback_error:
-                        logger.error(
-                            f"Error sending fallback message: {fallback_error}",
-                            exc_info=True,
-                        )
+                    outgoing_messages.append(TextMessage(text=fallback["text"]))
+
+            # 合併分批發送：每 5 個 message 一次 push，只計 1 則額度
+            if outgoing_messages:
+                logger.info(
+                    f"Sending {len(outgoing_messages)} messages in batched pushes"
+                )
+                await send_messages_batched(target_id, outgoing_messages)
 
     except Exception as error:
         logger.error(
