@@ -152,6 +152,16 @@ def convert_jsonl_to_move_stats(jsonl_data: list) -> list:
     ]
 
 
+def extract_initial_stones(jsonl_data: list) -> list:
+    """Extract handicap/setup stones (SGF AB/AW placements) echoed by katawrap"""
+    for response in jsonl_data:
+        if isinstance(response, dict):
+            initial_stones = response.get("initialStones")
+            if isinstance(initial_stones, list):
+                return initial_stones
+    return []
+
+
 async def convert_jsonl_to_move_stats_file(file_path: str) -> dict:
     """Convert JSONL file to format containing statistics"""
     try:
@@ -159,7 +169,12 @@ async def convert_jsonl_to_move_stats_file(file_path: str) -> dict:
         filename = os.path.basename(file_path)
         moves = convert_jsonl_to_move_stats(data)
 
-        return {"filename": filename, "totalLines": len(data), "moves": moves}
+        return {
+            "filename": filename,
+            "totalLines": len(data),
+            "initialStones": extract_initial_stones(data),
+            "moves": moves,
+        }
     except Exception as error:
         logger.error(f"Error converting JSONL to move stats: {error}", exc_info=True)
         raise

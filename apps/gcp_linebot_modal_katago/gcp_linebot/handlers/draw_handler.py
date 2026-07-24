@@ -170,9 +170,22 @@ class DrawGoBoard:
         return new_board
 
 
-def build_board_from_moves(moves_data, up_to_move):
+def place_initial_stones(board, initial_stones):
+    """放置讓子/設置棋（SGF AB/AW），格式為 [[color, gtp_coord], ...]"""
+    for stone in initial_stones or []:
+        if not isinstance(stone, (list, tuple)) or len(stone) != 2:
+            continue
+        color, gtp = stone
+        coord = gtp_to_coord(gtp)
+        if coord:
+            x, y = coord
+            board.place_stone(x, y, color)
+
+
+def build_board_from_moves(moves_data, up_to_move, initial_stones=None):
     """根据 moves 数据构建到指定手数为止的棋盘状态"""
     board = DrawGoBoard(19)
+    place_initial_stones(board, initial_stones)
 
     # 只处理到 up_to_move 之前的走子
     for move_data in moves_data:
@@ -446,9 +459,10 @@ def draw_board(
     return img
 
 
-def draw_global_board(all_moves_data, output_path):
+def draw_global_board(all_moves_data, output_path, initial_stones=None):
     """绘制全局棋盘，每个棋子上标注手数"""
     board = DrawGoBoard(19)
+    place_initial_stones(board, initial_stones)
 
     # 构建完整棋盘状态
     for move_data in all_moves_data:
@@ -681,7 +695,7 @@ def draw_winrate_chart(all_moves_data, output_path):
     print(f"Winrate chart saved: {filename}")
 
 
-def create_gif_for_move(move_data, all_moves_data, output_path):
+def create_gif_for_move(move_data, all_moves_data, output_path, initial_stones=None):
     """为单个 move 创建 GIF 动画"""
     move_number = move_data["move"]
     played = move_data.get("played")
@@ -690,7 +704,7 @@ def create_gif_for_move(move_data, all_moves_data, output_path):
     color = move_data.get("color", "B")
 
     # 构建到当前手数之前的棋盘（不包含当前手）
-    board = build_board_from_moves(all_moves_data, move_number)
+    board = build_board_from_moves(all_moves_data, move_number, initial_stones)
 
     frames = []
 
@@ -820,6 +834,7 @@ async def draw_all_moves_gif(
 
     # Get all moves (for building board state)
     all_moves = data.get("moves", [])
+    initial_stones = data.get("initialStones", [])
 
     # Filter and get top moves (top 20) by selected metric
     top_moves = get_top_review_moves(all_moves, top_n=20, metric=selection_metric)
@@ -829,7 +844,7 @@ async def draw_all_moves_gif(
 
     # First draw global board
     global_board_path = os.path.join(output_dir, "global_board.png")
-    draw_global_board(all_moves, global_board_path)
+    draw_global_board(all_moves, global_board_path, initial_stones)
     
     # Draw winrate chart
     winrate_chart_path = os.path.join(output_dir, "winrate_chart.png")
@@ -843,7 +858,7 @@ async def draw_all_moves_gif(
         output_path = os.path.join(output_dir, output_filename)
 
         # Create GIF
-        create_gif_for_move(move_data, all_moves, output_path)
+        create_gif_for_move(move_data, all_moves, output_path, initial_stones)
         print(f"GIF created: {output_filename}")
         gif_paths.append(output_path)
 
